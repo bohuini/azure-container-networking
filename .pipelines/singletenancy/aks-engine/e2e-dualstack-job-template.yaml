@@ -79,11 +79,6 @@ stages:
               ./dualstack-ws/aks-engine version
             displayName: "Install aks-engine binary"
 
-          - task: ManifestGeneratorTask@0
-            displayName: "Add SBOM Generator tool"
-            inputs:
-              BuildDropPath: '$(Build.ArtifactStagingDirectory)'
-
           - task: AzureCLI@1
             inputs:
               azureSubscription: $(AKS_ENGINE_SERVICE_CONNECTION)
