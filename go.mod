@@ -34,7 +34,7 @@ require (
 	golang.org/x/sys v0.0.0-20210823070655-63515b42dcdf
 	golang.org/x/term v0.0.0-20210503060354-a79de5458b56 // indirect
 	google.golang.org/grpc v1.40.0
-	google.golang.org/protobuf v1.27.1
+	google.golang.org/protobuf v1.28.0
 	k8s.io/api v0.22.4
 	k8s.io/apiextensions-apiserver v0.22.1
 	k8s.io/apimachinery v0.22.4
@@ -107,7 +107,6 @@ require (
 )
 
 require (
-	github.com/gofrs/uuid v3.3.0+incompatible // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 )
