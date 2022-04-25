@@ -8,27 +8,32 @@ import (
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane"
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane/ipsets"
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane/policies"
+	"github.com/Azure/azure-container-networking/npm/util"
 )
 
 const (
-	MaxSleepTime = 2
-	includeLists = false
+	MaxSleepTime            = 1
+	finalSleepTimeInSeconds = 10
+	includeLists            = false
 )
 
 var (
+	counter = 0
+
 	dpCfg = &dataplane.Config{
 		IPSetManagerCfg: &ipsets.IPSetManagerCfg{
 			IPSetMode:   ipsets.ApplyAllIPSets,
 			NetworkName: "azure",
 		},
 		PolicyManagerCfg: &policies.PolicyManagerCfg{
-			PolicyMode: policies.IPSetPolicyMode,
+			PolicyMode:           policies.IPSetPolicyMode,
+			PlaceAzureChainFirst: util.PlaceAzureChainFirst,
 		},
 	}
 
 	nodeName   = "testNode"
 	testNetPol = &policies.NPMNetworkPolicy{
-		Name: "test/test-netpol",
+		PolicyKey: "test/test-netpol",
 		PodSelectorIPSets: []*ipsets.TranslatedIPSet{
 			{
 				Metadata: ipsets.TestNSSet.Metadata,
@@ -73,8 +78,9 @@ var (
 )
 
 func main() {
-	dp, err := dataplane.NewDataPlane(nodeName, common.NewIOShim(), dpCfg)
+	dp, err := dataplane.NewDataPlane(nodeName, common.NewIOShim(), dpCfg, make(chan struct{}, 1))
 	panicOnError(err)
+	dp.RunPeriodicTasks()
 	printAndWait(true)
 
 	podMetadata := &dataplane.PodMetadata{
@@ -93,7 +99,7 @@ func main() {
 	panicOnError(dp.AddToSets([]*ipsets.IPSetMetadata{ipsets.TestNSSet.Metadata}, podMetadataB))
 	podMetadataC := &dataplane.PodMetadata{
 		PodKey:   "c",
-		PodIP:    "10.240.0.28",
+		PodIP:    "10.240.0.83",
 		NodeName: nodeName,
 	}
 	panicOnError(dp.AddToSets([]*ipsets.IPSetMetadata{ipsets.TestKeyPodSet.Metadata, ipsets.TestNSSet.Metadata}, podMetadataC))
@@ -117,13 +123,17 @@ func main() {
 		NodeName: "",
 	}
 	panicOnError(dp.AddToSets([]*ipsets.IPSetMetadata{ipsets.TestKeyPodSet.Metadata, ipsets.TestNSSet.Metadata}, podMetadataD))
-	dp.DeleteIPSet(ipsets.TestKVPodSet.Metadata)
+	dp.DeleteIPSet(ipsets.TestKVPodSet.Metadata, util.SoftDelete)
 	panicOnError(dp.ApplyDataPlane())
+
+	if includeLists {
+		panicOnError(dp.AddToLists([]*ipsets.IPSetMetadata{ipsets.TestNestedLabelList.Metadata}, []*ipsets.IPSetMetadata{ipsets.TestKVPodSet.Metadata, ipsets.TestNSSet.Metadata}))
+	}
 
 	printAndWait(true)
 	panicOnError(dp.RemoveFromSets([]*ipsets.IPSetMetadata{ipsets.TestNSSet.Metadata}, podMetadata))
 
-	dp.DeleteIPSet(ipsets.TestNSSet.Metadata)
+	dp.DeleteIPSet(ipsets.TestNSSet.Metadata, util.SoftDelete)
 	panicOnError(dp.ApplyDataPlane())
 	printAndWait(true)
 
@@ -138,7 +148,7 @@ func main() {
 
 	podMetadataD = &dataplane.PodMetadata{
 		PodKey:   "d",
-		PodIP:    "10.240.0.27",
+		PodIP:    "10.240.0.91",
 		NodeName: nodeName,
 	}
 	panicOnError(dp.AddToSets([]*ipsets.IPSetMetadata{ipsets.TestKeyPodSet.Metadata, ipsets.TestNSSet.Metadata}, podMetadataD))
@@ -162,6 +172,21 @@ func main() {
 	printAndWait(true)
 	panicOnError(dp.AddPolicy(policies.TestNetworkPolicies[0]))
 	fmt.Println("AZURE-NPM should have rules now")
+	printAndWait(true)
+
+	unusedSet1 := ipsets.NewIPSetMetadata("unused-set1", ipsets.CIDRBlocks)
+	fmt.Printf("\ncreating an empty set, it should be deleted by reconcile: %s\n", unusedSet1.GetHashedName())
+	dp.CreateIPSets([]*ipsets.IPSetMetadata{unusedSet1})
+	panicOnError(dp.ApplyDataPlane())
+
+	fmt.Printf("sleeping %d seconds to allow reconcile (update the reconcile time in dataplane.go to be less than %d seconds)\n", finalSleepTimeInSeconds, finalSleepTimeInSeconds)
+	time.Sleep(time.Duration(finalSleepTimeInSeconds) * time.Second)
+
+	unusedSet2 := ipsets.NewIPSetMetadata("unused-set2", ipsets.CIDRBlocks)
+	fmt.Printf("\ncreating an unused set %s. The prior empty set %s should be deleted on this apply\n", unusedSet2.GetHashedName(), unusedSet1.GetHashedName())
+	dp.CreateIPSets([]*ipsets.IPSetMetadata{unusedSet2})
+	panicOnError(dp.ApplyDataPlane())
+
 }
 
 func panicOnError(err error) {
@@ -171,7 +196,8 @@ func panicOnError(err error) {
 }
 
 func printAndWait(wait bool) {
-	fmt.Printf("#####################\nCompleted running, please check relevant commands, script will resume in %d secs\n#############\n", MaxSleepTime)
+	counter++
+	fmt.Printf("#####################\nCompleted running step %d, please check relevant commands, script will resume in %d secs\n#############\n", counter, MaxSleepTime)
 	if wait {
 		for i := 0; i < MaxSleepTime; i++ {
 			fmt.Print(".")

@@ -6,6 +6,7 @@ import (
 
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane/ipsets"
 	"github.com/Azure/azure-container-networking/npm/util"
+	npmerrors "github.com/Azure/azure-container-networking/npm/util/errors"
 	"k8s.io/klog"
 )
 
@@ -17,6 +18,7 @@ type NPMNetworkPolicy struct {
 	PolicyKey string
 	// PodSelectorIPSets holds all the IPSets generated from Pod Selector
 	PodSelectorIPSets []*ipsets.TranslatedIPSet
+	// TODO change to slice of pointers
 	// PodSelectorList holds target pod information to avoid duplicatoin in SrcList and DstList fields in ACLs
 	PodSelectorList []SetInfo
 	// RuleIPSets holds all IPSets generated from policy's rules
@@ -34,6 +36,52 @@ func NewNPMNetworkPolicy(netPolName, netPolNamespace string) *NPMNetworkPolicy {
 		NameSpace: netPolNamespace,
 		PolicyKey: fmt.Sprintf("%s/%s", netPolNamespace, netPolName),
 	}
+}
+
+func (netPol *NPMNetworkPolicy) numACLRulesProducedInKernel() int {
+	numRules := 0
+	hasIngress := false
+	hasEgress := false
+	for _, aclPolicy := range netPol.ACLs {
+		if aclPolicy.hasIngress() {
+			hasIngress = true
+			numRules++
+		}
+		if aclPolicy.hasEgress() {
+			hasEgress = true
+			numRules++
+		}
+	}
+
+	// both Windows and Linux have an extra ACL rule for ingress and an extra rule for egress
+	if hasIngress {
+		numRules++
+	}
+	if hasEgress {
+		numRules++
+	}
+	return numRules
+}
+
+func (netPol *NPMNetworkPolicy) PrettyString() string {
+	if netPol == nil {
+		klog.Infof("NPMNetworkPolicy is nil when trying to print string")
+		return "nil NPMNetworkPolicy"
+	}
+	itemStrings := make([]string, 0, len(netPol.ACLs))
+	for _, item := range netPol.ACLs {
+		itemStrings = append(itemStrings, item.PrettyString())
+	}
+	aclArrayString := strings.Join(itemStrings, "\n--\n")
+
+	podSelectorIPSetString := translatedIPSetsToString(netPol.PodSelectorIPSets)
+	podSelectorListString := infoArrayToString(netPol.PodSelectorList)
+	format := `Name:%s  Namespace:%s
+PodSelectorIPSets: %s
+PodSelectorList: %s
+ACLs:
+%s`
+	return fmt.Sprintf(format, netPol.Name, netPol.NameSpace, podSelectorIPSetString, podSelectorListString, aclArrayString)
 }
 
 // ACLPolicy equivalent to a single iptable rule in linux
@@ -74,6 +122,57 @@ const policyIDPrefix = "azure-acl"
 // but aclPolicy in the same network policy has the same aclPolicyID.
 func aclPolicyID(policyNS, policyName string) string {
 	return fmt.Sprintf("%s-%s-%s", policyIDPrefix, policyNS, policyName)
+}
+
+// NormalizePolicy helps fill in missed fields in aclPolicy
+func NormalizePolicy(networkPolicy *NPMNetworkPolicy) {
+	for _, aclPolicy := range networkPolicy.ACLs {
+		if aclPolicy.Protocol == "" {
+			aclPolicy.Protocol = UnspecifiedProtocol
+		}
+
+		if aclPolicy.DstPorts.EndPort == 0 {
+			aclPolicy.DstPorts.EndPort = aclPolicy.DstPorts.Port
+		}
+	}
+}
+
+// TODO do verification in controller?
+func ValidatePolicy(networkPolicy *NPMNetworkPolicy) error {
+	for _, aclPolicy := range networkPolicy.ACLs {
+		if !aclPolicy.hasKnownTarget() {
+			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has unknown target [%s]", aclPolicy.PolicyID, aclPolicy.Target))
+		}
+		if !aclPolicy.hasKnownDirection() {
+			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has unknown direction [%s]", aclPolicy.PolicyID, aclPolicy.Direction))
+		}
+		if !aclPolicy.hasKnownProtocol() {
+			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has unknown protocol [%s]", aclPolicy.PolicyID, aclPolicy.Protocol))
+		}
+		if !aclPolicy.satisifiesPortAndProtocolConstraints() {
+			return npmerrors.SimpleError(fmt.Sprintf(
+				"ACL policy %s has dst port(s) (Port or Port and EndPort), so must have protocol tcp, udp, udplite, sctp, or dccp but has protocol %s",
+				aclPolicy.PolicyID,
+				string(aclPolicy.Protocol),
+			))
+		}
+
+		if !aclPolicy.DstPorts.isValidRange() {
+			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has invalid port range in DstPorts (start: %d, end: %d)", aclPolicy.PolicyID, aclPolicy.DstPorts.Port, aclPolicy.DstPorts.EndPort))
+		}
+
+		for _, setInfo := range aclPolicy.SrcList {
+			if !setInfo.hasKnownMatchType() {
+				return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has set %s in SrcList with unknown Match Type", aclPolicy.PolicyID, setInfo.IPSet.Name))
+			}
+		}
+		for _, setInfo := range aclPolicy.DstList {
+			if !setInfo.hasKnownMatchType() {
+				return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has set %s in DstList with unknown Match Type", aclPolicy.PolicyID, setInfo.IPSet.Name))
+			}
+		}
+	}
+	return nil
 }
 
 // TODO make this a method of NPMNetworkPolicy, and just use netPol.PolicyKey as the PolicyID
@@ -148,28 +247,7 @@ func (aclPolicy *ACLPolicy) hasNamedPort() bool {
 	return false
 }
 
-func (netPol *NPMNetworkPolicy) String() string {
-	if netPol == nil {
-		klog.Infof("NPMNetworkPolicy is nil when trying to print string")
-		return "nil NPMNetworkPolicy"
-	}
-	itemStrings := make([]string, 0, len(netPol.ACLs))
-	for _, item := range netPol.ACLs {
-		itemStrings = append(itemStrings, item.String())
-	}
-	aclArrayString := strings.Join(itemStrings, "\n--\n")
-
-	podSelectorIPSetString := translatedIPSetsToString(netPol.PodSelectorIPSets)
-	podSelectorListString := infoArrayToString(netPol.PodSelectorList)
-	format := `Name:%s  Namespace:%s
-PodSelectorIPSets: %s
-PodSelectorList: %s
-ACLs:
-%s`
-	return fmt.Sprintf(format, netPol.Name, netPol.NameSpace, podSelectorIPSetString, podSelectorListString, aclArrayString)
-}
-
-func (aclPolicy *ACLPolicy) String() string {
+func (aclPolicy *ACLPolicy) PrettyString() string {
 	format := `Target:%s  Direction:%s  Protocol:%s  Ports:%+v
 SrcList: %s
 DstList: %s`
@@ -179,7 +257,7 @@ DstList: %s`
 func infoArrayToString(items []SetInfo) string {
 	itemStrings := make([]string, 0, len(items))
 	for _, item := range items {
-		itemStrings = append(itemStrings, fmt.Sprintf("{%s}", item.String()))
+		itemStrings = append(itemStrings, fmt.Sprintf("{%s}", item.PrettyString()))
 	}
 	return fmt.Sprintf("[%s]", strings.Join(itemStrings, ","))
 }
@@ -188,7 +266,7 @@ func translatedIPSetsToString(items []*ipsets.TranslatedIPSet) string {
 	itemStrings := make([]string, 0, len(items))
 	for _, item := range items {
 		ipset := ipsets.NewIPSet(item.Metadata)
-		itemStrings = append(itemStrings, fmt.Sprintf("{%s}", ipset.String()))
+		itemStrings = append(itemStrings, fmt.Sprintf("{%s}", ipset.PrettyString()))
 	}
 	return fmt.Sprintf("[%s]", strings.Join(itemStrings, ","))
 }
@@ -221,7 +299,7 @@ func NewSetInfo(name string, setType ipsets.SetType, included bool, matchType Ma
 	}
 }
 
-func (info SetInfo) String() string {
+func (info SetInfo) PrettyString() string {
 	return fmt.Sprintf("Name:%s  HashedName:%s  MatchType:%v  Included:%v", info.IPSet.GetPrefixName(), info.IPSet.GetHashedName(), info.MatchType, info.Included)
 }
 

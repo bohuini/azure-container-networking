@@ -210,14 +210,12 @@ func (ipsMgr *IpsetManager) run(entry *ipsEntry) (int, error) {
 	return 0, nil
 }
 
-func (ipsMgr *IpsetManager) createList(listName string) error {
-	prometheusTimer := metrics.StartNewTimer()
+// CreateListNoLock is identical to CreateList except it does not lock the ipsMgr.
+func (ipsMgr *IpsetManager) CreateListNoLock(listName string) error {
 
 	if _, exists := ipsMgr.listMap[listName]; exists {
 		return nil
 	}
-
-	defer metrics.RecordIPSetExecTime(prometheusTimer) // record execution time regardless of failure
 
 	entry := &ipsEntry{
 		name:          listName,
@@ -226,7 +224,9 @@ func (ipsMgr *IpsetManager) createList(listName string) error {
 		spec:          []string{util.IpsetSetListFlag},
 	}
 	log.Logf("Creating List: %+v", entry)
+	timer := metrics.StartNewTimer()
 	errCode, err := ipsMgr.run(entry)
+	metrics.RecordIPSetExecTime(timer) // record execution time regardless of failure
 	if err != nil && errCode != 1 {
 		metrics.SendErrorLogAndMetric(util.IpsmID, "Error: failed to create ipset list %s.", listName)
 		return err
@@ -239,8 +239,8 @@ func (ipsMgr *IpsetManager) createList(listName string) error {
 	return nil
 }
 
-// createSet creates an ipset.
-func (ipsMgr *IpsetManager) createSet(setName string, spec []string) error {
+// CreateSetNoLock is identical to CreateSet except it does not lock the ipsMgr.
+func (ipsMgr *IpsetManager) CreateSetNoLock(setName string, spec []string) error {
 	// This timer measures execution time to run this function regardless of success or failure cases
 	prometheusTimer := metrics.StartNewTimer()
 
@@ -305,14 +305,18 @@ func (ipsMgr *IpsetManager) deleteSet(setName string) error {
 func (ipsMgr *IpsetManager) CreateList(listName string) error {
 	ipsMgr.Lock()
 	defer ipsMgr.Unlock()
-	return ipsMgr.createList(listName)
+	return ipsMgr.CreateListNoLock(listName)
 }
 
 // AddToList inserts an ipset to an ipset list.
 func (ipsMgr *IpsetManager) AddToList(listName string, setName string) error {
 	ipsMgr.Lock()
 	defer ipsMgr.Unlock()
+	return ipsMgr.AddToListNoLock(listName, setName)
+}
 
+// AddToListNoLock is identical to AddToList except it does not lock the ipsMgr.
+func (ipsMgr *IpsetManager) AddToListNoLock(listName, setName string) error {
 	if listName == setName {
 		return nil
 	}
@@ -333,7 +337,7 @@ func (ipsMgr *IpsetManager) AddToList(listName string, setName string) error {
 		return fmt.Errorf("Failed to add set [%s] to list [%s], but list is of type [%s]", setName, listName, listtype)
 	} else if !exists {
 		// if the list doesn't exist, create it
-		if err := ipsMgr.createList(listName); err != nil {
+		if err := ipsMgr.CreateListNoLock(listName); err != nil {
 			return err
 		}
 	}
@@ -427,7 +431,7 @@ func (ipsMgr *IpsetManager) DeleteFromList(listName string, setName string) erro
 func (ipsMgr *IpsetManager) CreateSet(setName string, spec []string) error {
 	ipsMgr.Lock()
 	defer ipsMgr.Unlock()
-	return ipsMgr.createSet(setName, spec)
+	return ipsMgr.CreateSetNoLock(setName, spec)
 }
 
 // DeleteSet removes a set from ipset.
@@ -441,7 +445,11 @@ func (ipsMgr *IpsetManager) DeleteSet(setName string) error {
 func (ipsMgr *IpsetManager) AddToSet(setName, ip, spec, podKey string) error {
 	ipsMgr.Lock()
 	defer ipsMgr.Unlock()
+	return ipsMgr.AddToSetNoLock(setName, ip, spec, podKey)
+}
 
+// AddToSetNoLock is identical to AddToSet except it does not lock the ipsMgr.
+func (ipsMgr *IpsetManager) AddToSetNoLock(setName, ip, spec, podKey string) error {
 	if ipsMgr.exists(setName, ip, spec) {
 		// make sure we have updated the podKey in case it gets changed
 		cachedPodKey := ipsMgr.setMap[setName].elements[ip]
@@ -469,7 +477,7 @@ func (ipsMgr *IpsetManager) AddToSet(setName, ip, spec, podKey string) error {
 	exists, _ := ipsMgr.setExists(setName)
 
 	if !exists {
-		if err := ipsMgr.createSet(setName, []string{spec}); err != nil {
+		if err := ipsMgr.CreateSetNoLock(setName, []string{spec}); err != nil {
 			return err
 		}
 	}
@@ -619,9 +627,10 @@ func (ipsMgr *IpsetManager) DestroyNpmIpsets() error {
 		_, err := ipsMgr.run(flushEntry)
 		if err != nil {
 			metrics.SendErrorLogAndMetric(util.IpsmID, "{DestroyNpmIpsets} Error: failed to flush ipset %s", ipsetName)
+		} else {
+			metrics.RemoveAllEntriesFromIPSet(ipsetName)
 		}
 	}
-
 	for _, ipsetName := range ipsetLists {
 		deleteEntry := &ipsEntry{
 			operationFlag: util.IpsetDestroyFlag,
@@ -631,8 +640,6 @@ func (ipsMgr *IpsetManager) DestroyNpmIpsets() error {
 		if err != nil {
 			destroyFailureCount++
 			metrics.SendErrorLogAndMetric(util.IpsmID, "{DestroyNpmIpsets} Error: failed to destroy ipset %s", ipsetName)
-		} else {
-			metrics.RemoveAllEntriesFromIPSet(ipsetName)
 		}
 	}
 
@@ -644,9 +651,10 @@ func (ipsMgr *IpsetManager) DestroyNpmIpsets() error {
 	} else {
 		metrics.ResetNumIPSets()
 	}
-	// NOTE: in v2, we reset ipset entries, but in v1 we only remove entries for ipsets we delete.
-	// So v2 may underestimate the number of entries if there are destroy failures,
-	// but v1 may miss removing entries if some sets are in the prometheus metric but not in the kernel.
+	// NOTE: in v2, we reset metrics blindly, regardless of errors
+	// So v2 would underestimate the number of ipsets/entries if there are destroy failures.
+	// In v1 we remove entries for ipsets we flush.
+	// We may miss removing entries if some sets are in the prometheus metric but not in the kernel.
 
 	return nil
 }

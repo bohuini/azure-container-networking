@@ -2,13 +2,14 @@ package cns
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 
 	"github.com/Azure/azure-container-networking/cns/types"
+	"github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Container Network Service DNC Contract
@@ -254,6 +255,27 @@ func NewPodInfoFromIPConfigRequest(req IPConfigRequest) (PodInfo, error) {
 	return p, nil
 }
 
+func KubePodsToPodInfoByIP(pods []corev1.Pod) (map[string]PodInfo, error) {
+	podInfoByIP := map[string]PodInfo{}
+	for i := range pods {
+		if pods[i].Spec.HostNetwork {
+			// ignore host network pods.
+			continue
+		}
+		if strings.TrimSpace(pods[i].Status.PodIP) == "" {
+			// ignore pods without an assigned IP.
+			continue
+		}
+		// error if we have already recorded that this IP is assigned to a Pod.
+		if _, ok := podInfoByIP[pods[i].Status.PodIP]; ok {
+			return nil, errors.Wrap(ErrDuplicateIP, pods[i].Status.PodIP)
+		}
+		// record the PodInfo by assigned IP.
+		podInfoByIP[pods[i].Status.PodIP] = NewPodInfo("", "", pods[i].Name, pods[i].Namespace)
+	}
+	return podInfoByIP, nil
+}
+
 // MultiTenancyInfo contains encap type and id.
 type MultiTenancyInfo struct {
 	EncapType string
@@ -447,6 +469,12 @@ type PublishNetworkContainerRequest struct {
 	JoinNetworkURL                    string
 	CreateNetworkContainerURL         string
 	CreateNetworkContainerRequestBody []byte
+}
+
+// NetworkContainerParameters parameters available in network container operations
+type NetworkContainerParameters struct {
+	AuthToken             string
+	AssociatedInterfaceID string
 }
 
 // PublishNetworkContainerResponse specifies the response to publish network container request.

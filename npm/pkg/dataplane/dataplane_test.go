@@ -23,13 +23,9 @@ var (
 			NetworkName: "azure",
 		},
 		PolicyManagerCfg: &policies.PolicyManagerCfg{
-			PolicyMode: policies.IPSetPolicyMode,
+			PolicyMode:           policies.IPSetPolicyMode,
+			PlaceAzureChainFirst: util.PlaceAzureChainFirst,
 		},
-	}
-
-	fakeIPSetRestoreSuccess = testutils.TestCmd{
-		Cmd:      []string{util.Ipset, util.IpsetRestoreFlag},
-		ExitCode: 0,
 	}
 
 	setPodKey1 = &ipsets.TranslatedIPSet{
@@ -84,7 +80,7 @@ func TestNewDataPlane(t *testing.T) {
 	calls := getBootupTestCalls()
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
-	dp, err := NewDataPlane("testnode", ioshim, dpCfg)
+	dp, err := NewDataPlane("testnode", ioshim, dpCfg, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, dp)
 }
@@ -95,7 +91,7 @@ func TestCreateAndDeleteIpSets(t *testing.T) {
 	calls := getBootupTestCalls()
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
-	dp, err := NewDataPlane("testnode", ioshim, dpCfg)
+	dp, err := NewDataPlane("testnode", ioshim, dpCfg, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, dp)
 	setsTocreate := []*ipsets.IPSetMetadata{
@@ -121,7 +117,7 @@ func TestCreateAndDeleteIpSets(t *testing.T) {
 	}
 
 	for _, v := range setsTocreate {
-		dp.DeleteIPSet(v)
+		dp.DeleteIPSet(v, util.SoftDelete)
 	}
 
 	for _, v := range setsTocreate {
@@ -137,7 +133,7 @@ func TestAddToSet(t *testing.T) {
 	calls := getBootupTestCalls()
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
-	dp, err := NewDataPlane("testnode", ioshim, dpCfg)
+	dp, err := NewDataPlane("testnode", ioshim, dpCfg, nil)
 	require.NoError(t, err)
 
 	setsTocreate := []*ipsets.IPSetMetadata{
@@ -166,10 +162,10 @@ func TestAddToSet(t *testing.T) {
 	v6PodMetadata := NewPodMetadata("testns/a", "2001:db8:0:0:0:0:2:1", nodeName)
 	// Test IPV6 addess it should error out
 	err = dp.AddToSets(setsTocreate, v6PodMetadata)
-	require.NoError(t, err)
+	require.Error(t, err)
 
 	for _, v := range setsTocreate {
-		dp.DeleteIPSet(v)
+		dp.DeleteIPSet(v, util.SoftDelete)
 	}
 
 	for _, v := range setsTocreate {
@@ -182,10 +178,10 @@ func TestAddToSet(t *testing.T) {
 	require.NoError(t, err)
 
 	err = dp.RemoveFromSets(setsTocreate, v6PodMetadata)
-	require.NoError(t, err)
+	require.Error(t, err)
 
 	for _, v := range setsTocreate {
-		dp.DeleteIPSet(v)
+		dp.DeleteIPSet(v, util.SoftDelete)
 	}
 
 	for _, v := range setsTocreate {
@@ -201,7 +197,7 @@ func TestApplyPolicy(t *testing.T) {
 	calls := append(getBootupTestCalls(), getAddPolicyTestCallsForDP(&testPolicyobj)...)
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
-	dp, err := NewDataPlane("testnode", ioshim, dpCfg)
+	dp, err := NewDataPlane("testnode", ioshim, dpCfg, nil)
 	require.NoError(t, err)
 
 	err = dp.AddPolicy(&testPolicyobj)
@@ -215,7 +211,7 @@ func TestRemovePolicy(t *testing.T) {
 	calls = append(calls, getRemovePolicyTestCallsForDP(&testPolicyobj)...)
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
-	dp, err := NewDataPlane("testnode", ioshim, dpCfg)
+	dp, err := NewDataPlane("testnode", ioshim, dpCfg, nil)
 	require.NoError(t, err)
 
 	err = dp.AddPolicy(&testPolicyobj)
@@ -245,7 +241,7 @@ func TestUpdatePolicy(t *testing.T) {
 	}
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
-	dp, err := NewDataPlane("testnode", ioshim, dpCfg)
+	dp, err := NewDataPlane("testnode", ioshim, dpCfg, nil)
 	require.NoError(t, err)
 
 	err = dp.AddPolicy(&testPolicyobj)
@@ -283,50 +279,4 @@ func getAffectedIPSets(networkPolicy *policies.NPMNetworkPolicy) []*ipsets.IPSet
 		sets = append(sets, translatedIPSet.Metadata)
 	}
 	return sets
-}
-
-func TestValidateIPBlock(t *testing.T) {
-	tests := []struct {
-		name    string
-		ipblock string
-		wantErr bool
-	}{
-		{
-			name:    "cidr",
-			ipblock: "172.17.0.0/16",
-			wantErr: false,
-		},
-		{
-			name:    "except ipblock",
-			ipblock: "172.17.1.0/24 nomatch",
-			wantErr: false,
-		},
-		{
-			name:    "incorrect ip format",
-			ipblock: "1234",
-			wantErr: true,
-		},
-		{
-			name:    "incorrect ip range",
-			ipblock: "256.1.2.3",
-			wantErr: true,
-		},
-		{
-			name:    "empty cidr",
-			ipblock: "",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateIPBlock(tt.ipblock)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
 }

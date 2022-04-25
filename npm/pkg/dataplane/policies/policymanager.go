@@ -3,9 +3,10 @@ package policies
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/Azure/azure-container-networking/common"
+	"github.com/Azure/azure-container-networking/npm/metrics"
+	"github.com/Azure/azure-container-networking/npm/util"
 	npmerrors "github.com/Azure/azure-container-networking/npm/util/errors"
 	"k8s.io/klog"
 )
@@ -20,24 +21,34 @@ const (
 	// IPPolicyMode will replace ipset names with their value IPs in policies
 	IPPolicyMode PolicyManagerMode = "IP"
 
-	reconcileTimeInMinutes = 5
+	// this number is based on the implementation in chain-management_linux.go
+	// it represents the number of rules unrelated to policies
+	// it's technically 3 off when there are no policies since we flush the AZURE-NPM chain then
+	numLinuxBaseACLRules = 11
 )
 
 type PolicyManagerCfg struct {
 	// PolicyMode only affects Windows
 	PolicyMode PolicyManagerMode
+	// PlaceAzureChainFirst only affects Linux
+	PlaceAzureChainFirst bool
 }
 
 type PolicyMap struct {
 	cache map[string]*NPMNetworkPolicy
 }
 
-type PolicyManager struct {
-	policyMap   *PolicyMap
-	ioShim      *common.IOShim
-	staleChains *staleChains
-	*PolicyManagerCfg
+type reconcileManager struct {
 	sync.Mutex
+	releaseLockSignal chan struct{}
+}
+
+type PolicyManager struct {
+	policyMap        *PolicyMap
+	ioShim           *common.IOShim
+	staleChains      *staleChains
+	reconcileManager *reconcileManager
+	*PolicyManagerCfg
 }
 
 func NewPolicyManager(ioShim *common.IOShim, cfg *PolicyManagerCfg) *PolicyManager {
@@ -45,37 +56,42 @@ func NewPolicyManager(ioShim *common.IOShim, cfg *PolicyManagerCfg) *PolicyManag
 		policyMap: &PolicyMap{
 			cache: make(map[string]*NPMNetworkPolicy),
 		},
-		ioShim:           ioShim,
-		staleChains:      newStaleChains(),
+		ioShim:      ioShim,
+		staleChains: newStaleChains(),
+		reconcileManager: &reconcileManager{
+			releaseLockSignal: make(chan struct{}, 1),
+		},
 		PolicyManagerCfg: cfg,
 	}
 }
 
 func (pMgr *PolicyManager) Bootup(epIDs []string) error {
+	metrics.ResetNumACLRules()
 	if err := pMgr.bootup(epIDs); err != nil {
+		// NOTE: in Linux, Prometheus metrics may be off at this point since some ACL rules may have been applied successfully
+		metrics.SendErrorLogAndMetric(util.IptmID, "error: failed to bootup policy manager: %s", err.Error())
 		return npmerrors.ErrorWrapper(npmerrors.BootupPolicyMgr, false, "failed to bootup policy manager", err)
+	}
+
+	if !util.IsWindowsDP() {
+		// update Prometheus metrics on success
+		metrics.IncNumACLRulesBy(numLinuxBaseACLRules)
 	}
 	return nil
 }
 
-// TODO call this function in DP
+func (pMgr *PolicyManager) Reconcile() {
+	pMgr.reconcile()
+}
 
-func (pMgr *PolicyManager) Reconcile(stopChannel <-chan struct{}) {
-	go func() {
-		ticker := time.NewTicker(time.Minute * time.Duration(reconcileTimeInMinutes))
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-stopChannel:
-				return
-			case <-ticker.C:
-				pMgr.Lock()
-				defer pMgr.Unlock()
-				pMgr.reconcile()
-			}
-		}
-	}()
+func (pMgr *PolicyManager) GetAllPolicies() []string {
+	policyKeys := make([]string, len(pMgr.policyMap.cache))
+	i := 0
+	for policyKey := range pMgr.policyMap.cache {
+		policyKeys[i] = policyKey
+		i++
+	}
+	return policyKeys
 }
 
 func (pMgr *PolicyManager) PolicyExists(policyKey string) bool {
@@ -93,17 +109,28 @@ func (pMgr *PolicyManager) AddPolicy(policy *NPMNetworkPolicy, endpointList map[
 		klog.Infof("[DataPlane] No ACLs in policy %s to apply", policy.PolicyKey)
 		return nil
 	}
-	normalizePolicy(policy)
-	if err := validatePolicy(policy); err != nil {
-		return npmerrors.Errorf(npmerrors.AddPolicy, false, fmt.Sprintf("couldn't add malformed policy: %s", err.Error()))
+
+	// TODO move this validation and normalization to controller
+	NormalizePolicy(policy)
+	if err := ValidatePolicy(policy); err != nil {
+		msg := fmt.Sprintf("failed to validate policy: %s", err.Error())
+		metrics.SendErrorLogAndMetric(util.IptmID, "error: %s", msg)
+		return npmerrors.Errorf(npmerrors.AddPolicy, false, msg)
 	}
-	klog.Infof("PRINTING-CONTENTS-FOR-ADDING-POLICY:\n%s", policy.String())
 
 	// Call actual dataplane function to apply changes
+	timer := metrics.StartNewTimer()
 	err := pMgr.addPolicy(policy, endpointList)
+	metrics.RecordACLRuleExecTime(timer) // record execution time regardless of failure
 	if err != nil {
-		return npmerrors.Errorf(npmerrors.AddPolicy, false, fmt.Sprintf("failed to add policy: %v", err))
+		// NOTE: in Linux, Prometheus metrics may be off at this point since some ACL rules may have been applied successfully
+		msg := fmt.Sprintf("failed to add policy: %s", err.Error())
+		metrics.SendErrorLogAndMetric(util.IptmID, "error: %s", msg)
+		return npmerrors.Errorf(npmerrors.AddPolicy, false, msg)
 	}
+
+	// update Prometheus metrics on success
+	metrics.IncNumACLRulesBy(policy.numACLRulesProducedInKernel())
 
 	pMgr.policyMap.cache[policy.PolicyKey] = policy
 	return nil
@@ -115,11 +142,8 @@ func (pMgr *PolicyManager) isFirstPolicy() bool {
 
 func (pMgr *PolicyManager) RemovePolicy(policyKey string, endpointList map[string]string) error {
 	policy, ok := pMgr.GetPolicy(policyKey)
-	klog.Infof("PRINTING-CONTENTS-FOR-REMOVING-POLICY:\n%s", policy.String())
 
 	if !ok {
-		klog.Infof("DEBUGME-POLICY-DOESN'T-EXIST-WHEN-DELETING")
-		klog.Infof("POLICY-CACHE: %+v", pMgr.policyMap.cache)
 		return nil
 	}
 
@@ -129,66 +153,23 @@ func (pMgr *PolicyManager) RemovePolicy(policyKey string, endpointList map[strin
 	}
 	// Call actual dataplane function to apply changes
 	err := pMgr.removePolicy(policy, endpointList)
+	// currently we only have acl rule exec time for "adding" rules, so we skip recording here
 	if err != nil {
-		return npmerrors.Errorf(npmerrors.RemovePolicy, false, fmt.Sprintf("failed to remove policy: %v", err))
+		// NOTE: in Linux, Prometheus metrics may be off at this point since some ACL rules may have been applied successfully
+		msg := fmt.Sprintf("failed to remove policy: %s", err.Error())
+		metrics.SendErrorLogAndMetric(util.IptmID, "error: %s", msg)
+		return npmerrors.Errorf(npmerrors.RemovePolicy, false, msg)
 	}
+
+	// update Prometheus metrics on success
+	metrics.DecNumACLRulesBy(policy.numACLRulesProducedInKernel())
 
 	delete(pMgr.policyMap.cache, policyKey)
 	return nil
 }
 
 func (pMgr *PolicyManager) isLastPolicy() bool {
-	// if change our code to delete more than one policy at once, we can specify numPoliciesToDelete as an argument
+	// if we change our code to delete more than one policy at once, we can specify numPoliciesToDelete as an argument
 	numPoliciesToDelete := 1
 	return len(pMgr.policyMap.cache) == numPoliciesToDelete
-}
-
-func normalizePolicy(networkPolicy *NPMNetworkPolicy) {
-	for _, aclPolicy := range networkPolicy.ACLs {
-		if aclPolicy.Protocol == "" {
-			aclPolicy.Protocol = UnspecifiedProtocol
-		}
-
-		if aclPolicy.DstPorts.EndPort == 0 {
-			aclPolicy.DstPorts.EndPort = aclPolicy.DstPorts.Port
-		}
-	}
-}
-
-// TODO do verification in controller?
-func validatePolicy(networkPolicy *NPMNetworkPolicy) error {
-	for _, aclPolicy := range networkPolicy.ACLs {
-		if !aclPolicy.hasKnownTarget() {
-			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has unknown target [%s]", aclPolicy.PolicyID, aclPolicy.Target))
-		}
-		if !aclPolicy.hasKnownDirection() {
-			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has unknown direction [%s]", aclPolicy.PolicyID, aclPolicy.Direction))
-		}
-		if !aclPolicy.hasKnownProtocol() {
-			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has unknown protocol [%s]", aclPolicy.PolicyID, aclPolicy.Protocol))
-		}
-		if !aclPolicy.satisifiesPortAndProtocolConstraints() {
-			return npmerrors.SimpleError(fmt.Sprintf(
-				"ACL policy %s has dst port(s) (Port or Port and EndPort), so must have protocol tcp, udp, udplite, sctp, or dccp but has protocol %s",
-				aclPolicy.PolicyID,
-				string(aclPolicy.Protocol),
-			))
-		}
-
-		if !aclPolicy.DstPorts.isValidRange() {
-			return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has invalid port range in DstPorts (start: %d, end: %d)", aclPolicy.PolicyID, aclPolicy.DstPorts.Port, aclPolicy.DstPorts.EndPort))
-		}
-
-		for _, setInfo := range aclPolicy.SrcList {
-			if !setInfo.hasKnownMatchType() {
-				return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has set %s in SrcList with unknown Match Type", aclPolicy.PolicyID, setInfo.IPSet.Name))
-			}
-		}
-		for _, setInfo := range aclPolicy.DstList {
-			if !setInfo.hasKnownMatchType() {
-				return npmerrors.SimpleError(fmt.Sprintf("ACL policy %s has set %s in DstList with unknown Match Type", aclPolicy.PolicyID, setInfo.IPSet.Name))
-			}
-		}
-	}
-	return nil
 }

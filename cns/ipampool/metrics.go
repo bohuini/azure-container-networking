@@ -5,93 +5,121 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+const (
+	subnetLabel              = "subnet"
+	subnetCIDRLabel          = "subnet_cidr"
+	podnetARMIDLabel         = "podnet_arm_id"
+	customerMetricLabel      = "customer_metric"
+	customerMetricLabelValue = "customer metric"
+)
+
 var (
-	ipamAllocatedIPCount = prometheus.NewGauge(
+	ipamAllocatedIPCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_allocated_ips",
-			Help: "CNS's allocated IP pool size.",
+			Name:        "cx_ipam_pod_allocated_ips",
+			Help:        "Count of IPs CNS has allocated to Pods.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamAssignedIPCount = prometheus.NewGauge(
+	ipamAvailableIPCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_assigned_ips",
-			Help: "Assigned IP count.",
+			Name:        "cx_ipam_available_ips",
+			Help:        "Available IP count.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamAvailableIPCount = prometheus.NewGauge(
+	ipamBatchSize = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_available_ips",
-			Help: "Available IP count.",
+			Name:        "cx_ipam_batch_size",
+			Help:        "IPAM IP pool batch size.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamBatchSize = prometheus.NewGauge(
+	ipamCurrentAvailableIPcount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_batch_size",
-			Help: "IPAM IP pool batch size.",
+			Name:        "cx_ipam_current_available_ips",
+			Help:        "Current available IP count.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamMaxIPCount = prometheus.NewGauge(
+	ipamExpectedAvailableIPCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_max_ips",
-			Help: "Maximum IP count.",
+			Name:        "cx_ipam_expect_available_ips",
+			Help:        "Expected future available IP count assuming the Requested IP count is honored.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamPendingProgramIPCount = prometheus.NewGauge(
+	ipamMaxIPCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_pending_programming_ips",
-			Help: "Pending programming IP count.",
+			Name:        "cx_ipam_max_ips",
+			Help:        "Maximum IP count.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamPendingReleaseIPCount = prometheus.NewGauge(
+	ipamPendingProgramIPCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_pending_release_ips",
-			Help: "Pending release IP count.",
+			Name:        "cx_ipam_pending_programming_ips",
+			Help:        "Pending programming IP count.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamRequestedIPConfigCount = prometheus.NewGauge(
+	ipamPendingReleaseIPCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_requested_ips",
-			Help: "Requested IP count.",
+			Name:        "cx_ipam_pending_release_ips",
+			Help:        "Pending release IP count.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamRequestedUnassignedIPConfigCount = prometheus.NewGauge(
+	ipamRequestedIPConfigCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_requested_unassigned_ips",
-			Help: "Future unassigned IP count assuming the Requested IP count is honored.",
+			Name:        "cx_ipam_requested_ips",
+			Help:        "Requested IP count.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
-	ipamUnassignedIPCount = prometheus.NewGauge(
+	ipamTotalIPCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "ipam_unassigned_ips",
-			Help: "Unassigned IP count.",
+			Name:        "cx_ipam_total_ips",
+			Help:        "Count of total IP pool size allocated to CNS by DNC.",
+			ConstLabels: prometheus.Labels{customerMetricLabel: customerMetricLabelValue},
 		},
+		[]string{subnetLabel, subnetCIDRLabel, podnetARMIDLabel},
 	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(
 		ipamAllocatedIPCount,
-		ipamAssignedIPCount,
 		ipamAvailableIPCount,
 		ipamBatchSize,
+		ipamCurrentAvailableIPcount,
+		ipamExpectedAvailableIPCount,
 		ipamMaxIPCount,
 		ipamPendingProgramIPCount,
 		ipamPendingReleaseIPCount,
 		ipamRequestedIPConfigCount,
-		ipamRequestedUnassignedIPConfigCount,
-		ipamUnassignedIPCount,
+		ipamTotalIPCount,
 	)
 }
 
-func observeIPPoolState(state ipPoolState, meta metaState) {
-	ipamAllocatedIPCount.Set(float64(state.allocated))
-	ipamAssignedIPCount.Set(float64(state.assigned))
-	ipamAvailableIPCount.Set(float64(state.available))
-	ipamBatchSize.Set(float64(meta.batch))
-	ipamMaxIPCount.Set(float64(meta.max))
-	ipamPendingProgramIPCount.Set(float64(state.pendingProgramming))
-	ipamPendingReleaseIPCount.Set(float64(state.pendingRelease))
-	ipamRequestedIPConfigCount.Set(float64(state.requested))
-	ipamRequestedUnassignedIPConfigCount.Set(float64(state.requestedUnassigned))
-	ipamUnassignedIPCount.Set(float64(state.unassigned))
+func observeIPPoolState(state ipPoolState, meta metaState, labels []string) {
+	ipamAllocatedIPCount.WithLabelValues(labels...).Set(float64(state.allocatedToPods))
+	ipamAvailableIPCount.WithLabelValues(labels...).Set(float64(state.available))
+	ipamBatchSize.WithLabelValues(labels...).Set(float64(meta.batch))
+	ipamCurrentAvailableIPcount.WithLabelValues(labels...).Set(float64(state.currentAvailableIPs))
+	ipamExpectedAvailableIPCount.WithLabelValues(labels...).Set(float64(state.expectedAvailableIPs))
+	ipamMaxIPCount.WithLabelValues(labels...).Set(float64(meta.max))
+	ipamPendingProgramIPCount.WithLabelValues(labels...).Set(float64(state.pendingProgramming))
+	ipamPendingReleaseIPCount.WithLabelValues(labels...).Set(float64(state.pendingRelease))
+	ipamRequestedIPConfigCount.WithLabelValues(labels...).Set(float64(state.requestedIPs))
+	ipamTotalIPCount.WithLabelValues(labels...).Set(float64(state.totalIPs))
 }

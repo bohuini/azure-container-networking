@@ -167,7 +167,7 @@ func (f Hnsv2wrapperFake) GetNetworkByName(networkName string) (*hcn.HostCompute
 	if network, ok := f.Cache.networks[networkName]; ok {
 		return network.GetHCNObj(), nil
 	}
-	return &hcn.HostComputeNetwork{}, nil
+	return nil, hcn.NetworkNotFoundError{}
 }
 
 func (f Hnsv2wrapperFake) GetNetworkByID(networkID string) (*hcn.HostComputeNetwork, error) {
@@ -283,6 +283,10 @@ func (f Hnsv2wrapperFake) ApplyEndpointPolicy(endpoint *hcn.HostComputeEndpoint,
 	}
 
 	return nil
+}
+
+func (Hnsv2wrapperFake) GetEndpointByName(endpointName string) (*hcn.HostComputeEndpoint, error) {
+	return nil, hcn.EndpointNotFoundError{EndpointName: endpointName}
 }
 
 type FakeHNSCache struct {

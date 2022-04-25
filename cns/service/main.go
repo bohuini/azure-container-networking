@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"runtime"
@@ -46,9 +47,16 @@ import (
 	"github.com/Azure/azure-container-networking/store"
 	"github.com/avast/retry-go/v3"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 const (
@@ -330,8 +338,8 @@ func sendRegisterNodeRequest(
 	httpc *http.Client,
 	httpRestService cns.HTTPService,
 	nodeRegisterRequest cns.NodeRegisterRequest,
-	registerURL string) error {
-
+	registerURL string,
+) error {
 	var body bytes.Buffer
 	err := json.NewEncoder(&body).Encode(nodeRegisterRequest)
 	if err != nil {
@@ -568,16 +576,18 @@ func main() {
 				cns.GlobalPodInfoScheme = cns.InterfaceIDPodInfoScheme
 			}
 		}
-		if cnsconfig.InitializeFromCNI {
-			logger.Printf("Initializing from CNI")
-		} else {
-			logger.Printf("Initializing from Kubernetes")
-		}
-		logger.Printf("Set GlobalPodInfoScheme %v", cns.GlobalPodInfoScheme)
+		logger.Printf("Set GlobalPodInfoScheme %v (InitializeFromCNI=%t)", cns.GlobalPodInfoScheme, cnsconfig.InitializeFromCNI)
 
 		err = InitializeCRDState(rootCtx, httpRestService, cnsconfig)
 		if err != nil {
 			logger.Errorf("Failed to start CRD Controller, err:%v.\n", err)
+			return
+		}
+
+		// Setting the remote ARP MAC address to 12-34-56-78-9a-bc on windows for external traffic
+		err = platform.SetSdnRemoteArpMacAddress()
+		if err != nil {
+			logger.Errorf("Failed to set remote ARP MAC address: %v", err)
 			return
 		}
 	}
@@ -588,6 +598,13 @@ func main() {
 		err = InitializeMultiTenantController(rootCtx, httpRestService, *cnsconfig)
 		if err != nil {
 			logger.Errorf("Failed to start multiTenantController, err:%v.\n", err)
+			return
+		}
+
+		// Setting the remote ARP MAC address to 12-34-56-78-9a-bc on windows for external traffic
+		err = platform.SetSdnRemoteArpMacAddress()
+		if err != nil {
+			logger.Errorf("Failed to set remote ARP MAC address: %v", err)
 			return
 		}
 	}
@@ -821,8 +838,8 @@ type ncStateReconciler interface {
 }
 
 // TODO(rbtr) where should this live??
-// InitCNS initializes cns by passing pods and a createnetworkcontainerrequest
-func initCNS(ctx context.Context, cli nodeNetworkConfigGetter, ncReconciler ncStateReconciler) error {
+// reconcileInitialCNSState initializes cns by passing pods and a CreateNetworkContainerRequest
+func reconcileInitialCNSState(ctx context.Context, cli nodeNetworkConfigGetter, ncReconciler ncStateReconciler, podInfoByIPProvider cns.PodInfoByIPProvider) error {
 	// Get nnc using direct client
 	nnc, err := cli.Get(ctx)
 	if err != nil {
@@ -848,32 +865,27 @@ func initCNS(ctx context.Context, cli nodeNetworkConfigGetter, ncReconciler ncSt
 	}
 
 	// Convert to CreateNetworkContainerRequest
-	ncRequest, err := kubecontroller.CRDStatusToNCRequest(&nnc.Status)
-	if err != nil {
-		return errors.Wrap(err, "failed to convert NNC status to network container request")
-	}
+	for i := range nnc.Status.NetworkContainers {
+		ncRequest, err := kubecontroller.CreateNCRequestFromDynamicNC(nnc.Status.NetworkContainers[i])
+		if err != nil {
+			return errors.Wrap(err, "failed to convert NNC status to network container request")
+		}
+		// rebuild CNS state
+		podInfoByIP, err := podInfoByIPProvider.PodInfoByIP()
+		if err != nil {
+			return errors.Wrap(err, "provider failed to provide PodInfoByIP")
+		}
 
-	// rebuild CNS state from CNI
-	logger.Printf("initializing CNS from CNI")
-	podInfoByIPProvider, err := cnireconciler.NewCNIPodInfoProvider()
-	if err != nil {
-		return errors.Wrap(err, "failed to create CNI PodInfoProvider")
+		// Call cnsclient init cns passing those two things.
+		if err := restserver.ResponseCodeToError(ncReconciler.ReconcileNCState(ncRequest, podInfoByIP, nnc)); err != nil {
+			return errors.Wrap(err, "failed to reconcile NC state")
+		}
 	}
-	podInfoByIP, err := podInfoByIPProvider.PodInfoByIP()
-	if err != nil {
-		return errors.Wrap(err, "err in CNS initialization")
-	}
-
-	// errors.Wrap provides additional context, and return nil if the err input arg is nil
-	// Call cnsclient init cns passing those two things.
-	err = restserver.ResponseCodeToError(ncReconciler.ReconcileNCState(&ncRequest, podInfoByIP, nnc))
-	return errors.Wrap(err, "err in CNS reconciliation")
+	return nil
 }
 
 // InitializeCRDState builds and starts the CRD controllers.
 func InitializeCRDState(ctx context.Context, httpRestService cns.HTTPService, cnsconfig *configuration.CNSConfig) error {
-	logger.Printf("[Azure CNS] Starting request controller")
-
 	// convert interface type to implementation type
 	httpRestServiceImplementation, ok := httpRestService.(*restserver.HTTPRestService)
 	if !ok {
@@ -888,19 +900,52 @@ func InitializeCRDState(ctx context.Context, httpRestService cns.HTTPService, cn
 	}
 	httpRestServiceImplementation.SetNodeOrchestrator(&orchestrator)
 
+	// build default clientset.
 	kubeConfig, err := ctrl.GetConfig()
 	kubeConfig.UserAgent = fmt.Sprintf("azure-cns-%s", version)
 	if err != nil {
 		logger.Errorf("[Azure CNS] Failed to get kubeconfig for request controller: %v", err)
 		return err
 	}
-	nnccli, err := nodenetworkconfig.NewClient(kubeConfig)
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
-		return errors.Wrap(err, "failed to create NNC client")
+		return errors.Wrap(err, "failed to build clientset")
 	}
+
+	// get nodename for scoping kube requests to node.
 	nodeName, err := configuration.NodeName()
 	if err != nil {
 		return errors.Wrap(err, "failed to get NodeName")
+	}
+
+	var podInfoByIPProvider cns.PodInfoByIPProvider
+	if cnsconfig.InitializeFromCNI {
+		logger.Printf("Initializing from CNI")
+		podInfoByIPProvider, err = cnireconciler.NewCNIPodInfoProvider()
+		if err != nil {
+			return errors.Wrap(err, "failed to create CNI PodInfoProvider")
+		}
+	} else {
+		logger.Printf("Initializing from Kubernetes")
+		podInfoByIPProvider = cns.PodInfoByIPProviderFunc(func() (map[string]cns.PodInfo, error) {
+			pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{ //nolint:govet // ignore err shadow
+				FieldSelector: "spec.nodeName=" + nodeName,
+			})
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to list Pods for PodInfoProvider")
+			}
+			podInfo, err := cns.KubePodsToPodInfoByIP(pods.Items)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to convert Pods to PodInfoByIP")
+			}
+			return podInfo, nil
+		})
+	}
+
+	// create scoped kube clients.
+	nnccli, err := nodenetworkconfig.NewClient(kubeConfig)
+	if err != nil {
+		return errors.Wrap(err, "failed to create NNC client")
 	}
 	// TODO(rbtr): nodename and namespace should be in the cns config
 	scopedcli := kubecontroller.NewScopedClient(nnccli, types.NamespacedName{Namespace: "kube-system", Name: nodeName})
@@ -911,49 +956,103 @@ func InitializeCRDState(ctx context.Context, httpRestService cns.HTTPService, cn
 	}
 	poolMonitor := ipampool.NewMonitor(httpRestServiceImplementation, scopedcli, &poolOpts)
 	httpRestServiceImplementation.IPAMPoolMonitor = poolMonitor
-	logger.Printf("Starting IPAM Pool Monitor")
-	go func() {
-		if e := poolMonitor.Start(ctx); e != nil {
-			logger.Errorf("[Azure CNS] Failed to start pool monitor with err: %v", e)
-		}
-	}()
 
+	// reconcile initial CNS state from CNI or apiserver.
 	// apiserver nnc might not be registered or api server might be down and crashloop backof puts us outside of 5-10 minutes we have for
 	// aks addons to come up so retry a bit more aggresively here.
 	// will retry 10 times maxing out at a minute taking about 8 minutes before it gives up.
+	attempt := 0
 	err = retry.Do(func() error {
-		err = initCNS(ctx, scopedcli, httpRestServiceImplementation)
+		attempt++
+		logger.Printf("reconciling initial CNS state attempt: %d", attempt)
+		err = reconcileInitialCNSState(ctx, scopedcli, httpRestServiceImplementation, podInfoByIPProvider)
 		if err != nil {
-			logger.Errorf("[Azure CNS] Failed to init cns with err: %v", err)
+			logger.Errorf("failed to reconcile initial CNS state, attempt: %d err: %v", attempt, err)
 		}
 		return errors.Wrap(err, "failed to initialize CNS state")
 	}, retry.Context(ctx), retry.Delay(initCNSInitalDelay), retry.MaxDelay(time.Minute))
 	if err != nil {
 		return err
 	}
+	logger.Printf("reconciled initial CNS state after %d attempts", attempt)
+
+	// start the pool Monitor before the Reconciler, since it needs to be ready to receive an
+	// NodeNetworkConfig update by the time the Reconciler tries to send it.
+	go func() {
+		logger.Printf("Starting IPAM Pool Monitor")
+		if e := poolMonitor.Start(ctx); e != nil {
+			logger.Errorf("[Azure CNS] Failed to start pool monitor with err: %v", e)
+		}
+	}()
+	logger.Printf("initialized and started IPAM pool monitor")
+
+	// the nodeScopedCache sets Selector options on the Manager cache which are used
+	// to perform *server-side* filtering of the cached objects. This is very important
+	// for high node/pod count clusters, as it keeps us from watching objects at the
+	// whole cluster scope when we are only interested in the Node's scope.
+	nodeScopedCache := cache.BuilderWithOptions(cache.Options{
+		SelectorsByObject: cache.SelectorsByObject{
+			&v1alpha.NodeNetworkConfig{}: {
+				Field: fields.SelectorFromSet(fields.Set{"metadata.name": nodeName}),
+			},
+		},
+	})
 
 	manager, err := ctrl.NewManager(kubeConfig, ctrl.Options{
-		Scheme:             nodenetworkconfig.Scheme,
-		MetricsBindAddress: cnsconfig.MetricsBindAddress,
-		Namespace:          "kube-system", // TODO(rbtr): namespace should be in the cns config
+		Scheme:    nodenetworkconfig.Scheme,
+		Namespace: "kube-system", // TODO(rbtr): namespace should be in the cns config
+		NewCache:  nodeScopedCache,
 	})
 	if err != nil {
 		return errors.Wrap(err, "failed to create manager")
 	}
-	reconciler := kubecontroller.NewReconciler(nnccli, httpRestServiceImplementation, httpRestServiceImplementation.IPAMPoolMonitor)
-	if err := reconciler.SetupWithManager(manager, nodeName); err != nil {
-		return err
+
+	// get our Node so that we can xref it against the NodeNetworkConfig's to make sure that the
+	// NNC is not stale and represents the Node we're running on.
+	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return errors.Wrapf(err, "failed to get node %s", nodeName)
 	}
 
-	// Start the RequestController which starts the reconcile loop
+	reconciler := kubecontroller.NewReconciler(httpRestServiceImplementation, nnccli, poolMonitor)
+	// pass Node to the Reconciler for Controller xref
+	if err := reconciler.SetupWithManager(manager, node); err != nil {
+		return errors.Wrapf(err, "failed to setup reconciler with manager")
+	}
+
+	// adding some routes to the root serve mux
+	mux := httpRestServiceImplementation.Listener.GetMux()
+
+	if cnsconfig.Debug {
+		// add pprof endpoints
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
+
+	// add metrics endpoints
+	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{
+		ErrorHandling: promhttp.HTTPErrorOnError,
+	}))
+
+	// add healthz endpoints
+	healthzhandler := healthz.Handler{}
+	mux.Handle("/healthz", http.StripPrefix("/healthz", &healthzhandler))
+
+	// Start the Manager which starts the reconcile loop.
+	// The Reconciler will send an initial NodeNetworkConfig update to the PoolMonitor, starting the
+	// Monitor's internal loop.
 	go func() {
+		logger.Printf("Starting NodeNetworkConfig reconciler.")
 		for {
 			if err := manager.Start(ctx); err != nil {
 				logger.Errorf("[Azure CNS] Failed to start request controller: %v", err)
 				// retry to start the request controller
 				// todo: add a CNS metric to count # of failures
 			} else {
-				logger.Printf("[Azure CNS] Exiting RequestController")
+				logger.Printf("exiting NodeNetworkConfig reconciler")
 				return
 			}
 
@@ -961,9 +1060,17 @@ func InitializeCRDState(ctx context.Context, httpRestService cns.HTTPService, cn
 			time.Sleep(time.Second)
 		}
 	}()
+	logger.Printf("initialized NodeNetworkConfig reconciler")
+	// wait for up to 10m for the Reconciler to run once.
+	timedCtx, cancel := context.WithTimeout(ctx, 10*time.Minute) //nolint:gomnd // default 10m
+	defer cancel()
+	if started := reconciler.Started(timedCtx); !started {
+		return errors.Errorf("timed out waiting for reconciler start")
+	}
+	logger.Printf("started NodeNetworkConfig reconciler")
 
-	logger.Printf("Starting SyncHostNCVersion")
 	go func() {
+		logger.Printf("starting SyncHostNCVersion loop")
 		// Periodically poll vfp programmed NC version from NMAgent
 		tickerChannel := time.Tick(time.Duration(cnsconfig.SyncHostNCVersionIntervalMs) * time.Millisecond)
 		for {
@@ -973,10 +1080,13 @@ func InitializeCRDState(ctx context.Context, httpRestService cns.HTTPService, cn
 				httpRestServiceImplementation.SyncHostNCVersion(timedCtx, cnsconfig.ChannelMode)
 				cancel()
 			case <-ctx.Done():
+				logger.Printf("exiting SyncHostNCVersion")
 				return
 			}
 		}
 	}()
+
+	logger.Printf("initialized and started SyncHostNCVersion loop")
 
 	return nil
 }

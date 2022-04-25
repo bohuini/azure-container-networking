@@ -1,20 +1,26 @@
 package policies
 
 import (
+	"os"
 	"testing"
 
 	"github.com/Azure/azure-container-networking/common"
+	"github.com/Azure/azure-container-networking/npm/metrics"
+	"github.com/Azure/azure-container-networking/npm/metrics/promutil"
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane/ipsets"
+	"github.com/Azure/azure-container-networking/npm/util"
 	"github.com/stretchr/testify/require"
 )
 
 var (
 	ipsetConfig = &PolicyManagerCfg{
-		PolicyMode: IPSetPolicyMode,
+		PolicyMode:           IPSetPolicyMode,
+		PlaceAzureChainFirst: util.PlaceAzureChainFirst,
 	}
 
 	// below epList is no-op for linux
 	epList        = map[string]string{"10.0.0.1": "test123", "10.0.0.2": "test456"}
+	epIDs         = []string{"test123", "test456"}
 	testNSSet     = ipsets.NewIPSetMetadata("test-ns-set", ipsets.Namespace)
 	testKeyPodSet = ipsets.NewIPSetMetadata("test-keyPod-set", ipsets.KeyLabelOfPod)
 	testNetPol    = &NPMNetworkPolicy{
@@ -67,17 +73,67 @@ var (
 	}
 )
 
-func TestAddPolicy(t *testing.T) {
-	netpol := &NPMNetworkPolicy{}
+type promVals struct {
+	numACLs   int
+	execCount int
+}
 
-	calls := GetAddPolicyTestCalls(netpol)
+func (p promVals) testPrometheusMetrics(t *testing.T) {
+	numACLs, err := metrics.GetNumACLRules()
+	promutil.NotifyIfErrors(t, err)
+	require.Equal(t, p.numACLs, numACLs, "Prometheus didn't register correctly for num acls")
+
+	execCount, err := metrics.GetACLRuleExecCount()
+	promutil.NotifyIfErrors(t, err)
+	require.Equal(t, p.execCount, execCount, "Prometheus didn't register correctly for acl rule exec count")
+}
+
+// see chain-management_linux_test.go for testing when an error occurs
+func TestBootup(t *testing.T) {
+	metrics.ReinitializeAll()
+	calls := GetBootupTestCalls()
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
 	pMgr := NewPolicyManager(ioshim, ipsetConfig)
 
-	require.NoError(t, pMgr.AddPolicy(netpol, epList))
+	metrics.IncNumACLRules()
+	metrics.IncNumACLRules()
+
+	require.NoError(t, pMgr.Bootup(epIDs))
+
+	expectedNumACLs := 11
+	if util.IsWindowsDP() {
+		expectedNumACLs = 0
+	}
+	promVals{expectedNumACLs, 0}.testPrometheusMetrics(t)
+}
+
+// see policymanager_linux.go for testing when an error occurs
+func TestAddPolicy(t *testing.T) {
+	metrics.ReinitializeAll()
+	calls := GetAddPolicyTestCalls(testNetPol)
+	ioshim := common.NewMockIOShim(calls)
+	defer ioshim.VerifyCalls(t, calls)
+	pMgr := NewPolicyManager(ioshim, ipsetConfig)
 
 	require.NoError(t, pMgr.AddPolicy(testNetPol, epList))
+	_, ok := pMgr.GetPolicy(testNetPol.PolicyKey)
+	require.True(t, ok)
+	numTestNetPolACLRulesProducedInKernel := 3
+	if util.IsWindowsDP() {
+		numTestNetPolACLRulesProducedInKernel = 2
+	}
+	promVals{numTestNetPolACLRulesProducedInKernel, 1}.testPrometheusMetrics(t)
+}
+
+func TestAddEmptyPolicy(t *testing.T) {
+	metrics.ReinitializeAll()
+	ioshim := common.NewMockIOShim(nil)
+	pMgr := NewPolicyManager(ioshim, ipsetConfig)
+	require.NoError(t, pMgr.AddPolicy(&NPMNetworkPolicy{PolicyKey: "test"}, nil))
+	_, ok := pMgr.GetPolicy(testNetPol.PolicyKey)
+	require.False(t, ok)
+	promVals{0, 0}.testPrometheusMetrics(t)
 }
 
 func TestGetPolicy(t *testing.T) {
@@ -109,16 +165,25 @@ func TestGetPolicy(t *testing.T) {
 }
 
 func TestRemovePolicy(t *testing.T) {
+	metrics.ReinitializeAll()
 	calls := append(GetAddPolicyTestCalls(testNetPol), GetRemovePolicyTestCalls(testNetPol)...)
 	ioshim := common.NewMockIOShim(calls)
 	defer ioshim.VerifyCalls(t, calls)
 	pMgr := NewPolicyManager(ioshim, ipsetConfig)
-
 	require.NoError(t, pMgr.AddPolicy(testNetPol, epList))
+	require.NoError(t, pMgr.RemovePolicy(testNetPol.PolicyKey, nil))
+	_, ok := pMgr.GetPolicy(testNetPol.PolicyKey)
+	require.False(t, ok)
+	promVals{0, 1}.testPrometheusMetrics(t)
+}
 
+// see policymanager_linux.go for testing when an error occurs
+func TestRemoveNonexistentPolicy(t *testing.T) {
+	metrics.ReinitializeAll()
+	ioshim := common.NewMockIOShim(nil)
+	pMgr := NewPolicyManager(ioshim, ipsetConfig)
 	require.NoError(t, pMgr.RemovePolicy("wrong-policy-key", epList))
-
-	require.NoError(t, pMgr.RemovePolicy("x/test-netpol", nil))
+	promVals{0, 0}.testPrometheusMetrics(t)
 }
 
 func TestNormalizeAndValidatePolicy(t *testing.T) {
@@ -157,8 +222,8 @@ func TestNormalizeAndValidatePolicy(t *testing.T) {
 				PolicyKey: "x/test-netpol",
 				ACLs:      []*ACLPolicy{tt.acl},
 			}
-			normalizePolicy(netPol)
-			err := validatePolicy(netPol)
+			NormalizePolicy(netPol)
+			err := ValidatePolicy(netPol)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -166,4 +231,12 @@ func TestNormalizeAndValidatePolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMain(m *testing.M) {
+	metrics.InitializeAll()
+
+	exitCode := m.Run()
+
+	os.Exit(exitCode)
 }

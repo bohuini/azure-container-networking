@@ -43,7 +43,7 @@ var (
 // Error labels for ipsetmanager
 const (
 	InitializeDataPlane     = "InitializeDataPlane"
-	ResetDataPlane          = "ResetDataPlane"
+	BootupDataplane         = "BootupDataplane"
 	BootupPolicyMgr         = "BootupPolicyManager"
 	ResetIPSets             = "ResetIPSets"
 	CreateIPSet             = "CreateIPSet"
@@ -60,6 +60,7 @@ const (
 	AddNetPolReference      = "AddNetPolReference"
 	DeleteNetPolReference   = "DeleteNetPolReference"
 	RunFileCreator          = "RunCommandWithFile"
+	AddPod                  = "AddPod"
 )
 
 // Error codes for ipsetmanager

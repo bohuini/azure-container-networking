@@ -3,8 +3,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"time"
@@ -18,6 +16,7 @@ import (
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane"
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane/ipsets"
 	"github.com/Azure/azure-container-networking/npm/pkg/dataplane/policies"
+	"github.com/Azure/azure-container-networking/npm/pkg/models"
 	"github.com/Azure/azure-container-networking/npm/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -33,11 +32,12 @@ import (
 
 var npmV2DataplaneCfg = &dataplane.Config{
 	IPSetManagerCfg: &ipsets.IPSetManagerCfg{
-		IPSetMode:   ipsets.ApplyAllIPSets,
 		NetworkName: "azure", // FIXME  should be specified in DP config instead
+		// NOTE: IPSetMode must be set later by the npm ConfigMap or default config
 	},
 	PolicyManagerCfg: &policies.PolicyManagerCfg{
 		PolicyMode: policies.IPSetPolicyMode,
+		// NOTE: PlaceAzureChainFirst must be set later by the npm ConfigMap or default config
 	},
 }
 
@@ -46,28 +46,6 @@ func newStartNPMCmd() *cobra.Command {
 	startNPMCmd := &cobra.Command{
 		Use:   "start",
 		Short: "Starts the Azure NPM process",
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			viper.AutomaticEnv() // read in environment variables that match
-			viper.SetDefault(npmconfig.ConfigEnvPath, npmconfig.GetConfigPath())
-			cfgFile := viper.GetString(npmconfig.ConfigEnvPath)
-			viper.SetConfigFile(cfgFile)
-
-			// If a config file is found, read it in.
-			// NOTE: there is no config merging with default, if config is loaded, options must be set
-			if err := viper.ReadInConfig(); err == nil {
-				klog.Infof("Using config file: %+v", viper.ConfigFileUsed())
-			} else {
-				klog.Infof("Failed to load config from env %s: %v", npmconfig.ConfigEnvPath, err)
-				b, _ := json.Marshal(npmconfig.DefaultConfig)
-				err := viper.ReadConfig(bytes.NewBuffer(b))
-				if err != nil {
-					return fmt.Errorf("failed to read in default with err %w", err)
-				}
-			}
-
-			return nil
-		},
-
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config := &npmconfig.Config{}
 			err := viper.Unmarshal(config)
@@ -90,7 +68,7 @@ func newStartNPMCmd() *cobra.Command {
 
 func start(config npmconfig.Config, flags npmconfig.Flags) error {
 	klog.Infof("loaded config: %+v", config)
-	klog.Infof("Start NPM version: %s", version)
+	klog.Infof("starting NPM version %d with image %s", config.NPMVersion(), version)
 
 	var err error
 
@@ -137,22 +115,32 @@ func start(config npmconfig.Config, flags npmconfig.Flags) error {
 	k8sServerVersion := k8sServerVersion(clientset)
 
 	var dp dataplane.GenericDataplane
+	stopChannel := wait.NeverStop
 	if config.Toggles.EnableV2NPM {
-		dp, err = dataplane.NewDataPlane(npm.GetNodeName(), common.NewIOShim(), npmV2DataplaneCfg)
+		// update the dataplane config
+		npmV2DataplaneCfg.PlaceAzureChainFirst = config.Toggles.PlaceAzureChainFirst
+		if config.Toggles.ApplyIPSetsOnNeed {
+			npmV2DataplaneCfg.IPSetMode = ipsets.ApplyOnNeed
+		} else {
+			npmV2DataplaneCfg.IPSetMode = ipsets.ApplyAllIPSets
+		}
+
+		dp, err = dataplane.NewDataPlane(models.GetNodeName(), common.NewIOShim(), npmV2DataplaneCfg, stopChannel)
 		if err != nil {
 			return fmt.Errorf("failed to create dataplane with error %w", err)
 		}
+		dp.RunPeriodicTasks()
 	}
 	npMgr := npm.NewNetworkPolicyManager(config, factory, dp, exec.New(), version, k8sServerVersion)
-	err = metrics.CreateTelemetryHandle(version, npm.GetAIMetadata())
+	err = metrics.CreateTelemetryHandle(config.NPMVersion(), version, npm.GetAIMetadata())
 	if err != nil {
-		klog.Infof("CreateTelemetryHandle failed with error %v.", err)
-		return fmt.Errorf("CreateTelemetryHandle failed with error %w", err)
+		klog.Infof("CreateTelemetryHandle failed with error %v. AITelemetry is not initialized.", err)
 	}
 
 	go restserver.NPMRestServerListenAndServe(config, npMgr)
 
-	if err = npMgr.Start(config, wait.NeverStop); err != nil {
+	metrics.SendLog(util.NpmID, "starting NPM", metrics.PrintLog)
+	if err = npMgr.Start(config, stopChannel); err != nil {
 		metrics.SendErrorLogAndMetric(util.NpmID, "Failed to start NPM due to %+v", err)
 		return fmt.Errorf("failed to start with err: %w", err)
 	}

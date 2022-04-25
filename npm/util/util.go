@@ -5,6 +5,7 @@ package util
 import (
 	"fmt"
 	"hash/fnv"
+	"net"
 	"os"
 	"regexp"
 	"runtime"
@@ -16,6 +17,15 @@ import (
 	"github.com/Masterminds/semver"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/tools/cache"
+)
+
+// DeleteOption is used to decide if a delete is force delete or soft delete
+type DeleteOption bool
+
+const (
+	// For DeleteIPSet
+	ForceDelete DeleteOption = true
+	SoftDelete  DeleteOption = false
 )
 
 // IsNewNwPolicyVerFlag indicates if the current kubernetes version is newer than 1.11 or not
@@ -342,4 +352,13 @@ func CompareSlices(list1, list2 []string) bool {
 
 func SliceToString(list []string) string {
 	return strings.Join(list, SetPolicyDelimiter)
+}
+
+func IsIPV4(ip string) bool {
+	if net.ParseIP(ip).To4() != nil {
+		return true
+	}
+
+	_, _, err := net.ParseCIDR(ip)
+	return err == nil
 }

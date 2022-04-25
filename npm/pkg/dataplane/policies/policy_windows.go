@@ -69,6 +69,7 @@ func (acl *ACLPolicy) convertToAclSettings() (*NPMACLPolSettings, error) {
 		return policySettings, ErrNamedPortsNotSupported
 	}
 
+	policySettings.RuleType = hcn.RuleTypeSwitch
 	policySettings.Id = acl.PolicyID
 	policySettings.Direction = getHCNDirection(acl.Direction)
 	policySettings.Action = getHCNAction(acl.Target)
@@ -82,8 +83,12 @@ func (acl *ACLPolicy) convertToAclSettings() (*NPMACLPolSettings, error) {
 	if !ok {
 		return policySettings, ErrProtocolNotSupported
 	}
-	policySettings.Protocols = protoNum
 
+	if protoNum == "256" {
+		policySettings.Protocols = ""
+	} else {
+		policySettings.Protocols = protoNum
+	}
 	// Ignore adding ruletype for now as there is a bug
 	// policySettings.RuleType = hcn.RuleTypeSwitch
 
@@ -94,20 +99,34 @@ func (acl *ACLPolicy) convertToAclSettings() (*NPMACLPolSettings, error) {
 
 	// HNS has confusing Local and Remote address defintions
 	// For Traffic Direction INGRESS
-	// 		LocalAddresses = Source IPs
+	// 	    LocalAddresses  = Source Sets
+	// 	    RemoteAddresses = Destination Sets
+	//      LocalPorts      = Destination Ports
+	//      RemotePorts     = Source Ports
+
+	// For Traffic Direction EGRESS
+	// 	    LocalAddresses  = Source Sets
+	// 	    RemoteAddresses = Destination Sets
+	//      LocalPorts      = Source Ports
+	//      RemotePorts     = Destination Ports
+
+	// If we use IPs in ACLs, then INGRESS mapping is same, but EGRESS mapping will change to below
+	// For Traffic Direction INGRESS
+	// 		LocalAddresses  = Source IPs
 	// 		RemoteAddresses = Destination IPs
 	// For Traffic Direction EGRESS
-	// 		LocalAddresses = Destination IPs
+	// 		LocalAddresses  = Destination IPs
 	// 		RemoteAddresses = Source IPs
+
 	policySettings.LocalAddresses = srcListStr
 	policySettings.RemoteAddresses = dstListStr
-	policySettings.RemotePorts = dstPortStr
-	policySettings.LocalPorts = ""
+
+	// Switch ports based on direction
+	policySettings.RemotePorts = ""
+	policySettings.LocalPorts = dstPortStr
 	if policySettings.Direction == hcn.DirectionTypeOut {
-		policySettings.LocalAddresses = dstListStr
-		policySettings.LocalPorts = dstPortStr
-		policySettings.RemotePorts = ""
-		policySettings.RemoteAddresses = srcListStr
+		policySettings.LocalPorts = ""
+		policySettings.RemotePorts = dstPortStr
 	}
 
 	return policySettings, nil

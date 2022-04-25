@@ -28,12 +28,14 @@ func NPMRestServerListenAndServe(config npmconfig.Config, npmEncoder json.Marsha
 
 	// prometheus handlers
 	if config.Toggles.EnablePrometheusMetrics {
-		rs.router.Handle(api.NodeMetricsPath, metrics.GetHandler(true))
-		rs.router.Handle(api.ClusterMetricsPath, metrics.GetHandler(false))
+		rs.router.Handle(api.NodeMetricsPath, metrics.GetHandler(metrics.NodeMetrics))
+		rs.router.Handle(api.ClusterMetricsPath, metrics.GetHandler(metrics.ClusterMetrics))
 	}
 
-	if config.Toggles.EnableHTTPDebugAPI {
-		// ACN CLI debug handlerss
+	// TODO support the debug CLI for v2
+	// the nil check is for fan-out npm
+	if config.Toggles.EnableHTTPDebugAPI && npmEncoder != nil && !config.Toggles.EnableV2NPM {
+		// ACN CLI debug handlers
 		rs.router.Handle(api.NPMMgrPath, rs.npmCacheHandler(npmEncoder)).Methods(http.MethodGet)
 	}
 
@@ -69,7 +71,7 @@ func (n *NPMRestServer) npmCacheHandler(npmCacheEncoder json.Marshaler) http.Han
 		}
 		_, err = w.Write(b)
 		if err != nil {
-			log.Errorf("failed to write resp: %w", err)
+			log.Errorf("failed to write resp: %v", err)
 		}
 	})
 }

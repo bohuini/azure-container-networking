@@ -1,7 +1,6 @@
 package network
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -141,61 +140,38 @@ func setEndpointOptions(cnsNwConfig *cns.GetNetworkContainerResponse, epInfo *ne
 func addSnatInterface(nwCfg *cni.NetworkConfig, result *cniTypesCurr.Result) {
 }
 
-func updateSubnetPrefix(cnsNwConfig *cns.GetNetworkContainerResponse, subnetPrefix *net.IPNet) error {
-	if cnsNwConfig != nil && cnsNwConfig.MultiTenancyInfo.ID != 0 {
-		ipconfig := cnsNwConfig.IPConfiguration
-		ipAddr := net.ParseIP(ipconfig.IPSubnet.IPAddress)
-		if ipAddr.To4() != nil {
-			*subnetPrefix = net.IPNet{Mask: net.CIDRMask(int(ipconfig.IPSubnet.PrefixLength), 32)}
-		} else if ipAddr.To16() != nil {
-			*subnetPrefix = net.IPNet{Mask: net.CIDRMask(int(ipconfig.IPSubnet.PrefixLength), 128)}
-		} else {
-			return fmt.Errorf("[cni-net] Failed to get mask from CNS network configuration")
-		}
-
-		subnetPrefix.IP = ipAddr.Mask(subnetPrefix.Mask)
-		log.Printf("Updated subnetPrefix: %s", subnetPrefix.String())
+func (plugin *NetPlugin) getNetworkName(netNs string, ipamAddResult *IPAMAddResult, nwCfg *cni.NetworkConfig) (string, error) {
+	// For singletenancy, the network name is simply the nwCfg.Name
+	if !nwCfg.MultiTenancy {
+		return nwCfg.Name, nil
 	}
 
-	return nil
-}
-
-func (plugin *NetPlugin) getNetworkName(podName, podNs, ifName string, nwCfg *cni.NetworkConfig) (string, error) {
-	var (
-		networkName      string
-		err              error
-		cnsNetworkConfig *cns.GetNetworkContainerResponse
-	)
-
-	networkName = nwCfg.Name
-	err = nil
-
-	if nwCfg.MultiTenancy {
-		determineWinVer()
-		if len(strings.TrimSpace(podName)) == 0 || len(strings.TrimSpace(podNs)) == 0 {
-			err = fmt.Errorf("POD info cannot be empty. PodName: %s, PodNamespace: %s", podName, podNs)
-			return networkName, err
-		}
-
-		_, cnsNetworkConfig, _, err = plugin.multitenancyClient.GetContainerNetworkConfiguration(context.TODO(), nwCfg, podName, podNs, ifName)
-		if err != nil {
-			log.Printf(
-				"GetContainerNetworkConfiguration failed for podname %v namespace %v with error %v",
-				podName,
-				podNs,
-				err)
-		} else {
-			var subnet net.IPNet
-			if err = updateSubnetPrefix(cnsNetworkConfig, &subnet); err == nil {
-				// networkName will look like ~ azure-vlan1-172-28-1-0_24
-				networkName = strings.Replace(subnet.String(), ".", "-", -1)
-				networkName = strings.Replace(networkName, "/", "_", -1)
-				networkName = fmt.Sprintf("%s-vlan%v-%v", nwCfg.Name, cnsNetworkConfig.MultiTenancyInfo.ID, networkName)
-			}
-		}
+	// in multitenancy case, the network name will be in the state file or can be built from cnsResponse
+	determineWinVer()
+	if len(strings.TrimSpace(netNs)) == 0 {
+		return "", fmt.Errorf("NetNs cannot be empty")
 	}
 
-	return networkName, err
+	// First try to build the network name from the cnsResponse if present
+	// This will happen during ADD call
+	if ipamAddResult != nil && ipamAddResult.ncResponse != nil {
+		// networkName will look like ~ azure-vlan1-172-28-1-0_24
+		subnet := ipamAddResult.ipv4Result.IPs[0].Address
+		networkName := strings.Replace(subnet.String(), ".", "-", -1)
+		networkName = strings.Replace(networkName, "/", "_", -1)
+		networkName = fmt.Sprintf("%s-vlan%v-%v", nwCfg.Name, ipamAddResult.ncResponse.MultiTenancyInfo.ID, networkName)
+		return networkName, nil
+	}
+
+	// If no cnsResponse was present, try to get the network name from the state file
+	// This will happen during DEL call
+	networkName, err := plugin.nm.FindNetworkIDFromNetNs(netNs)
+	if err != nil {
+		log.Printf("Error getting network name from state: %v.", err)
+		return "", fmt.Errorf("error getting network name from state: %w", err)
+	}
+
+	return networkName, nil
 }
 
 func setupInfraVnetRoutingForMultitenancy(
@@ -399,7 +375,7 @@ func determineWinVer() {
 }
 
 func getNATInfo(executionMode string, ncPrimaryIPIface interface{}, multitenancy, enableSnatForDNS bool) (natInfo []policy.NATInfo) {
-	if executionMode == string(util.AKSSwift) {
+	if executionMode == string(util.V4Swift) {
 		ncPrimaryIP := ""
 		if ncPrimaryIPIface != nil {
 			ncPrimaryIP = ncPrimaryIPIface.(string)

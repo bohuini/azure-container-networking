@@ -80,10 +80,10 @@ func (dp *DataPlane) bootupDataPlane() error {
 
 	// It is important to keep order to clean-up ACLs before ipsets. Otherwise we won't be able to delete ipsets referenced by ACLs
 	if err := dp.policyMgr.Bootup(epIDs); err != nil {
-		return npmerrors.ErrorWrapper(npmerrors.ResetDataPlane, false, "failed to reset policy dataplane", err)
+		return npmerrors.ErrorWrapper(npmerrors.BootupDataplane, false, "failed to reset policy dataplane", err)
 	}
 	if err := dp.ipsetMgr.ResetIPSets(); err != nil {
-		return npmerrors.ErrorWrapper(npmerrors.ResetDataPlane, false, "failed to reset ipsets dataplane", err)
+		return npmerrors.ErrorWrapper(npmerrors.BootupDataplane, false, "failed to reset ipsets dataplane", err)
 	}
 	return nil
 }
@@ -112,7 +112,10 @@ func (dp *DataPlane) updatePod(pod *updateNPMPod) error {
 	// Check if pod is already present in cache
 	endpoint, ok := dp.endpointCache[pod.PodIP]
 	if !ok {
-		return fmt.Errorf("[DataPlane] did not find endpoint with IPaddress %s", pod.PodIP)
+		// ignore this err and pod endpoint will be deleted in ApplyDP
+		// if the endpoint is not found, it means the pod is not part of this node or pod got deleted.
+		klog.Warningf("[DataPlane] did not find endpoint with IPaddress %s", pod.PodIP)
+		return nil
 	}
 
 	if endpoint.IP != pod.PodIP {

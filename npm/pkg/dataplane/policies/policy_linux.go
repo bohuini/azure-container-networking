@@ -10,6 +10,16 @@ import (
 	"k8s.io/klog"
 )
 
+type UniqueDirection bool
+
+const (
+	forIngress UniqueDirection = true
+	forEgress  UniqueDirection = false
+
+	// 5-6 elements depending on Included boolean
+	maxLengthForMatchSetSpecs = 6
+)
+
 // returns two booleans indicating whether the network policy has ingress and egress respectively
 func (networkPolicy *NPMNetworkPolicy) hasIngressAndEgress() (hasIngress, hasEgress bool) {
 	hasIngress = false
@@ -33,13 +43,6 @@ func (networkPolicy *NPMNetworkPolicy) chainName(prefix string) string {
 	policyHash := util.Hash(networkPolicy.PolicyKey)
 	return joinWithDash(prefix, policyHash)
 }
-
-type UniqueDirection bool
-
-const (
-	forIngress UniqueDirection = true
-	forEgress  UniqueDirection = false
-)
 
 func (networkPolicy *NPMNetworkPolicy) commentForJumpToIngress() string {
 	return networkPolicy.commentForJump(forIngress)
@@ -83,6 +86,17 @@ func (info SetInfo) comment() string {
 	return "!" + name
 }
 
+func (info SetInfo) matchSetSpecs(matchString string) []string {
+	specs := make([]string, 0, maxLengthForMatchSetSpecs)
+	specs = append(specs, util.IptablesModuleFlag, util.IptablesSetModuleFlag)
+	if !info.Included {
+		specs = append(specs, util.IptablesNotFlag)
+	}
+	hashedSetName := info.IPSet.GetHashedName()
+	specs = append(specs, util.IptablesMatchSetFlag, hashedSetName, matchString)
+	return specs
+}
+
 func (aclPolicy *ACLPolicy) comment() string {
 	// cleanPeerList contains peers that aren't namedports
 	var cleanPeerList []SetInfo
@@ -98,7 +112,7 @@ func (aclPolicy *ACLPolicy) comment() string {
 	for _, info := range aclPolicy.DstList {
 		if info.IPSet.Type == ipsets.NamedPorts {
 			if foundNamedPortPeer {
-				klog.Errorf("while creating ACL comment, unexpectedly found more than one namedPort peer for ACL:\n%s", aclPolicy.String())
+				klog.Errorf("while creating ACL comment, unexpectedly found more than one namedPort peer for ACL:\n%s", aclPolicy.PrettyString())
 			}
 			namedPortPeer = info
 			foundNamedPortPeer = true
