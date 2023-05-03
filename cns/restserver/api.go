@@ -925,15 +925,17 @@ func (service *HTTPRestService) getNetworkContainerByOrchestratorContext(w http.
 	logger.Response(service.Name, getNetworkContainerResponses[0], getNetworkContainerResponses[0].Response.ReturnCode, err)
 }
 
-// getOrRefreshNetworkContainers is to check whether refresh association is needed.
+// getOrRefreshNetworkContainers is to check whether refresh association is needed. The state file in CNS will get updated if it is lost.
 // If received  "GET": Return all NCs in CNS's state file to DNC in order to check if NC refresh is needed
 // If received "POST": Store all the NCs (from the request body that client sent) into CNS's state file
 func (service *HTTPRestService) getOrRefreshNetworkContainers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		logger.Printf("[Azure CNS] getOrRefreshNetworkContainers received GET")
 		service.handleGetNetworkContainers(w)
 		return
 	case http.MethodPost:
+		logger.Printf("[Azure CNS] getOrRefreshNetworkContainers received POST")
 		service.handlePostNetworkContainers(w, r)
 		return
 	default:
