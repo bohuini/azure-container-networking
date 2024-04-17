@@ -44,7 +44,7 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	k8s.io/api v0.28.5
 	k8s.io/apiextensions-apiserver v0.28.3
-	k8s.io/apimachinery v0.28.5
+	k8s.io/apimachinery v0.29.4
 	k8s.io/client-go v0.28.5
 	k8s.io/klog v1.0.0
 	k8s.io/klog/v2 v2.120.1
@@ -107,10 +107,10 @@ require (
 	github.com/vishvananda/netns v0.0.4
 	go.opencensus.io v0.24.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.20.0
-	golang.org/x/net v0.21.0 // indirect
+	golang.org/x/crypto v0.21.0
+	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/oauth2 v0.16.0 // indirect
-	golang.org/x/term v0.17.0 // indirect
+	golang.org/x/term v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.5.0
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
@@ -145,6 +145,7 @@ require (
 	github.com/containerd/errdefs v0.1.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.0 // indirect
+	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
 	github.com/rootless-containers/rootlesskit v1.1.1 // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
