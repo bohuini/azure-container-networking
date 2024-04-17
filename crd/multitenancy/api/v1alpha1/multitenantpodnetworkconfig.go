@@ -4,6 +4,7 @@
 package v1alpha1
 
 import (
+	"github.com/Azure/azure-container-networking/cns"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -61,6 +62,8 @@ type MultitenantPodNetworkConfigStatus struct {
 	MacAddress string `json:"macAddress,omitempty"`
 	// Gateway IP
 	GatewayIP string `json:"gatewayIP,omitempty"`
+	// NICType specifies the type of NIC to enable appropriate programming by CNS/CNI
+	NICType cns.NICType `json:"NICType,omitempty"`
 }
 
 func init() {

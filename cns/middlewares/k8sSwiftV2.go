@@ -8,7 +8,6 @@ import (
 	"github.com/Azure/azure-container-networking/cns"
 	"github.com/Azure/azure-container-networking/cns/configuration"
 	"github.com/Azure/azure-container-networking/cns/logger"
-	"github.com/Azure/azure-container-networking/cns/middlewares/utils"
 	"github.com/Azure/azure-container-networking/cns/types"
 	"github.com/Azure/azure-container-networking/crd/multitenancy/api/v1alpha1"
 	"github.com/pkg/errors"
@@ -39,9 +38,9 @@ var _ cns.IPConfigsHandlerMiddleware = (*K8sSWIFTv2Middleware)(nil)
 
 // IPConfigsRequestHandlerWrapper is the middleware function for handling SWIFT v2 IP configs requests for AKS-SWIFT. This function wrapped the default SWIFT request
 // and release IP configs handlers.
-func (m *K8sSWIFTv2Middleware) IPConfigsRequestHandlerWrapper(defaultHandler, failureHandler cns.IPConfigsHandlerFunc) cns.IPConfigsHandlerFunc {
+func (k *K8sSWIFTv2Middleware) IPConfigsRequestHandlerWrapper(defaultHandler, failureHandler cns.IPConfigsHandlerFunc) cns.IPConfigsHandlerFunc {
 	return func(ctx context.Context, req cns.IPConfigsRequest) (*cns.IPConfigsResponse, error) {
-		podInfo, respCode, message := m.validateIPConfigsRequest(ctx, &req)
+		podInfo, respCode, message := k.validateIPConfigsRequest(ctx, &req)
 
 		if respCode != types.Success {
 			return &cns.IPConfigsResponse{
@@ -69,7 +68,7 @@ func (m *K8sSWIFTv2Middleware) IPConfigsRequestHandlerWrapper(defaultHandler, fa
 		if err != nil {
 			return ipConfigsResp, err
 		}
-		SWIFTv2PodIPInfo, err := m.getIPConfig(ctx, podInfo)
+		SWIFTv2PodIPInfo, err := k.getIPConfig(ctx, podInfo)
 		if err != nil {
 			return &cns.IPConfigsResponse{
 				Response: cns.Response{
@@ -83,7 +82,7 @@ func (m *K8sSWIFTv2Middleware) IPConfigsRequestHandlerWrapper(defaultHandler, fa
 		// Set routes for the pod
 		for i := range ipConfigsResp.PodIPInfo {
 			ipInfo := &ipConfigsResp.PodIPInfo[i]
-			err = m.setRoutes(ipInfo)
+			err = k.setRoutes(ipInfo)
 			if err != nil {
 				return &cns.IPConfigsResponse{
 					Response: cns.Response{
@@ -100,7 +99,7 @@ func (m *K8sSWIFTv2Middleware) IPConfigsRequestHandlerWrapper(defaultHandler, fa
 
 // validateIPConfigsRequest validates if pod is multitenant by checking the pod labels, used in SWIFT V2 AKS scenario.
 // nolint
-func (m *K8sSWIFTv2Middleware) validateIPConfigsRequest(ctx context.Context, req *cns.IPConfigsRequest) (podInfo cns.PodInfo, respCode types.ResponseCode, message string) {
+func (k *K8sSWIFTv2Middleware) validateIPConfigsRequest(ctx context.Context, req *cns.IPConfigsRequest) (podInfo cns.PodInfo, respCode types.ResponseCode, message string) {
 	// Retrieve the pod from the cluster
 	podInfo, err := cns.UnmarshalPodInfo(req.OrchestratorContext)
 	if err != nil {
@@ -110,7 +109,7 @@ func (m *K8sSWIFTv2Middleware) validateIPConfigsRequest(ctx context.Context, req
 	logger.Printf("[SWIFTv2Middleware] validate ipconfigs request for pod %s", podInfo.Name())
 	podNamespacedName := k8stypes.NamespacedName{Namespace: podInfo.Namespace(), Name: podInfo.Name()}
 	pod := v1.Pod{}
-	if err := m.Cli.Get(ctx, podNamespacedName, &pod); err != nil {
+	if err := k.Cli.Get(ctx, podNamespacedName, &pod); err != nil {
 		errBuf := errors.Wrapf(err, "failed to get pod %+v", podNamespacedName)
 		return nil, types.UnexpectedError, errBuf.Error()
 	}
@@ -121,11 +120,11 @@ func (m *K8sSWIFTv2Middleware) validateIPConfigsRequest(ctx context.Context, req
 		// Check if the MTPNC CRD exists for the pod, if not, return error
 		mtpnc := v1alpha1.MultitenantPodNetworkConfig{}
 		mtpncNamespacedName := k8stypes.NamespacedName{Namespace: podInfo.Namespace(), Name: podInfo.Name()}
-		if err := m.Cli.Get(ctx, mtpncNamespacedName, &mtpnc); err != nil {
+		if err := k.Cli.Get(ctx, mtpncNamespacedName, &mtpnc); err != nil {
 			return nil, types.UnexpectedError, fmt.Errorf("failed to get pod's mtpnc from cache : %w", err).Error()
 		}
 		// Check if the MTPNC CRD is ready. If one of the fields is empty, return error
-		if mtpnc.Status.PrimaryIP == "" || mtpnc.Status.MacAddress == "" || mtpnc.Status.NCID == "" || mtpnc.Status.GatewayIP == "" {
+		if !mtpnc.IsReady() {
 			return nil, types.UnexpectedError, errMTPNCNotReady.Error()
 		}
 	}
@@ -135,16 +134,16 @@ func (m *K8sSWIFTv2Middleware) validateIPConfigsRequest(ctx context.Context, req
 }
 
 // getIPConfig returns the pod's SWIFT V2 IP configuration.
-func (m *K8sSWIFTv2Middleware) getIPConfig(ctx context.Context, podInfo cns.PodInfo) (cns.PodIpInfo, error) {
+func (k *K8sSWIFTv2Middleware) getIPConfig(ctx context.Context, podInfo cns.PodInfo) (cns.PodIpInfo, error) {
 	// Check if the MTPNC CRD exists for the pod, if not, return error
 	mtpnc := v1alpha1.MultitenantPodNetworkConfig{}
 	mtpncNamespacedName := k8stypes.NamespacedName{Namespace: podInfo.Namespace(), Name: podInfo.Name()}
-	if err := m.Cli.Get(ctx, mtpncNamespacedName, &mtpnc); err != nil {
+	if err := k.Cli.Get(ctx, mtpncNamespacedName, &mtpnc); err != nil {
 		return cns.PodIpInfo{}, errors.Wrapf(err, "failed to get pod's mtpnc from cache")
 	}
 
 	// Check if the MTPNC CRD is ready. If one of the fields is empty, return error
-	if mtpnc.Status.PrimaryIP == "" || mtpnc.Status.MacAddress == "" || mtpnc.Status.NCID == "" || mtpnc.Status.GatewayIP == "" {
+	if !mtpnc.IsReady() {
 		return cns.PodIpInfo{}, errMTPNCNotReady
 	}
 	logger.Printf("[SWIFTv2Middleware] mtpnc for pod %s is : %+v", podInfo.Name(), mtpnc)
@@ -166,119 +165,10 @@ func (m *K8sSWIFTv2Middleware) getIPConfig(ctx context.Context, podInfo cns.PodI
 			PrefixLength: uint8(prefixSize),
 		},
 		MacAddress:        mtpnc.Status.MacAddress,
-		NICType:           cns.DelegatedVMNIC,
+		NICType:           mtpnc.Status.NICType,
 		SkipDefaultRoutes: false,
 		// InterfaceName is empty for DelegatedVMNIC
 	}
 
 	return podIPInfo, nil
-}
-
-// setRoutes sets the routes for podIPInfo used in SWIFT V2 scenario.
-func (m *K8sSWIFTv2Middleware) setRoutes(podIPInfo *cns.PodIpInfo) error {
-	logger.Printf("[SWIFTv2Middleware] set routes for pod with nic type : %s", podIPInfo.NICType)
-	podIPInfo.Routes = []cns.Route{}
-	switch podIPInfo.NICType {
-	case cns.DelegatedVMNIC:
-		virtualGWRoute := cns.Route{
-			IPAddress: fmt.Sprintf("%s/%d", virtualGW, prefixLength),
-		}
-		// default route via SWIFT v2 interface
-		route := cns.Route{
-			IPAddress:        "0.0.0.0/0",
-			GatewayIPAddress: virtualGW,
-		}
-		podIPInfo.Routes = []cns.Route{virtualGWRoute, route}
-	case cns.InfraNIC:
-		// Get and parse infraVNETCIDRs from env
-		infraVNETCIDRs, err := configuration.InfraVNETCIDRs()
-		if err != nil {
-			return errors.Wrapf(err, "failed to get infraVNETCIDRs from env")
-		}
-		infraVNETCIDRsv4, infraVNETCIDRsv6, err := utils.ParseCIDRs(infraVNETCIDRs)
-		if err != nil {
-			return errors.Wrapf(err, "failed to parse infraVNETCIDRs")
-		}
-
-		// Get and parse podCIDRs from env
-		podCIDRs, err := configuration.PodCIDRs()
-		if err != nil {
-			return errors.Wrapf(err, "failed to get podCIDRs from env")
-		}
-		podCIDRsV4, podCIDRv6, err := utils.ParseCIDRs(podCIDRs)
-		if err != nil {
-			return errors.Wrapf(err, "failed to parse podCIDRs")
-		}
-
-		// Get and parse serviceCIDRs from env
-		serviceCIDRs, err := configuration.ServiceCIDRs()
-		if err != nil {
-			return errors.Wrapf(err, "failed to get serviceCIDRs from env")
-		}
-		serviceCIDRsV4, serviceCIDRsV6, err := utils.ParseCIDRs(serviceCIDRs)
-		if err != nil {
-			return errors.Wrapf(err, "failed to parse serviceCIDRs")
-		}
-		// Check if the podIPInfo is IPv4 or IPv6
-		ip, err := netip.ParseAddr(podIPInfo.PodIPConfig.IPAddress)
-		if err != nil {
-			return errors.Wrapf(err, "failed to parse podIPConfig IP address %s", podIPInfo.PodIPConfig.IPAddress)
-		}
-		if ip.Is4() {
-			// routes for IPv4 podCIDR traffic
-			for _, podCIDRv4 := range podCIDRsV4 {
-				podCIDRv4Route := cns.Route{
-					IPAddress:        podCIDRv4,
-					GatewayIPAddress: overlayGatewayv4,
-				}
-				podIPInfo.Routes = append(podIPInfo.Routes, podCIDRv4Route)
-			}
-			// route for IPv4 serviceCIDR traffic
-			for _, serviceCIDRv4 := range serviceCIDRsV4 {
-				serviceCIDRv4Route := cns.Route{
-					IPAddress:        serviceCIDRv4,
-					GatewayIPAddress: overlayGatewayv4,
-				}
-				podIPInfo.Routes = append(podIPInfo.Routes, serviceCIDRv4Route)
-			}
-			// route for IPv4 infraVNETCIDR traffic
-			for _, infraVNETCIDRv4 := range infraVNETCIDRsv4 {
-				infraVNETCIDRv4Route := cns.Route{
-					IPAddress:        infraVNETCIDRv4,
-					GatewayIPAddress: overlayGatewayv4,
-				}
-				podIPInfo.Routes = append(podIPInfo.Routes, infraVNETCIDRv4Route)
-			}
-		} else {
-			// routes for IPv6 podCIDR traffic
-			for _, podCIDRv6 := range podCIDRv6 {
-				podCIDRv6Route := cns.Route{
-					IPAddress:        podCIDRv6,
-					GatewayIPAddress: overlayGatewayV6,
-				}
-				podIPInfo.Routes = append(podIPInfo.Routes, podCIDRv6Route)
-			}
-			// route for IPv6 serviceCIDR traffic
-			for _, serviceCIDRv6 := range serviceCIDRsV6 {
-				serviceCIDRv6Route := cns.Route{
-					IPAddress:        serviceCIDRv6,
-					GatewayIPAddress: overlayGatewayV6,
-				}
-				podIPInfo.Routes = append(podIPInfo.Routes, serviceCIDRv6Route)
-			}
-			// route for IPv6 infraVNETCIDR traffic
-			for _, infraVNETCIDRv6 := range infraVNETCIDRsv6 {
-				infraVNETCIDRv6Route := cns.Route{
-					IPAddress:        infraVNETCIDRv6,
-					GatewayIPAddress: overlayGatewayV6,
-				}
-				podIPInfo.Routes = append(podIPInfo.Routes, infraVNETCIDRv6Route)
-			}
-		}
-		podIPInfo.SkipDefaultRoutes = true
-	case cns.BackendNIC:
-	default:
-		return errInvalidSWIFTv2NICType
-	}
-	return nil
 }
