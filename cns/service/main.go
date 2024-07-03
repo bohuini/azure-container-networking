@@ -63,6 +63,7 @@ import (
 	localtls "github.com/Azure/azure-container-networking/server/tls"
 	"github.com/Azure/azure-container-networking/store"
 	"github.com/Azure/azure-container-networking/telemetry"
+	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/avast/retry-go/v4"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -1002,6 +1003,40 @@ func main() {
 		}(privateEndpoint, infravnet, nodeID)
 	}
 
+	// Check if channel mode is SWIFT V2 and not Direct. And Supply the MAC address to the HNS
+	if cnsconfig.EnableSwiftV2 && cnsconfig.ChannelMode != cns.Direct {
+		macAddress, err := GetPrimaryNICMacAddress()
+		if err != nil {
+			logger.Errorf("Failed to get primary NIC MAC address: %v", err)
+		} else {
+			logger.Printf("Primary NIC MAC Address: %s", macAddress)
+
+			macPools := []cns.MacPool{
+				cns.MacPool{
+					StartMacAddress: macAddress,
+				},
+			}
+			hnsNetworkRequest := cns.CreateHnsNetworkRequest{
+				NetworkAdapterName: "",
+				MacPools:           macPools,
+			}
+
+			if err := hnsclient.CreateHnsNetwork(hnsNetworkRequest); err != nil {
+				logger.Errorf("Failed to set primary NIC MAC address in HNS: %v", err)
+			}
+
+			hostComputeEndpoints := []hcn.HostComputeEndpoint{
+				hcn.HostComputeEndpoint{
+					MacAddress: macAddress,
+				},
+			}
+
+			if route, err := hcn.AddRoute(hostComputeEndpoints, "", "", false); err != nil {
+				logger.Errorf("Failed to set primary NIC MAC address: %v", err)
+			}
+		}
+	}
+
 	var (
 		netPlugin     network.NetPlugin
 		ipamPlugin    ipam.IpamPlugin
@@ -1606,4 +1641,9 @@ func PopulateCNSEndpointState(endpointStateStore store.KeyValueStore) error {
 		return fmt.Errorf("failed to write endpoint state to store: %w", err)
 	}
 	return nil
+}
+
+// GetPrimaryNICMacAddress fetches the MAC address of the primary NIC on the node.
+func GetPrimaryNICMacAddress() (string, error) {
+	return "", errors.New("primary NIC not found")
 }
