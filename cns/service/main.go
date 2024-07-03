@@ -52,6 +52,7 @@ import (
 	"github.com/Azure/azure-container-networking/crd"
 	cssv1alpha1 "github.com/Azure/azure-container-networking/crd/clustersubnetstate/api/v1alpha1"
 	"github.com/Azure/azure-container-networking/crd/multitenancy"
+	"github.com/Azure/azure-container-networking/crd/multitenancy/api/v1alpha1"
 	mtv1alpha1 "github.com/Azure/azure-container-networking/crd/multitenancy/api/v1alpha1"
 	"github.com/Azure/azure-container-networking/crd/nodenetworkconfig"
 	"github.com/Azure/azure-container-networking/crd/nodenetworkconfig/api/v1alpha"
@@ -63,7 +64,7 @@ import (
 	localtls "github.com/Azure/azure-container-networking/server/tls"
 	"github.com/Azure/azure-container-networking/store"
 	"github.com/Azure/azure-container-networking/telemetry"
-	"github.com/Microsoft/hcsshim/hcn"
+	"github.com/Microsoft/hcsshim"
 	"github.com/avast/retry-go/v4"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -75,6 +76,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	kuberuntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -1005,33 +1007,12 @@ func main() {
 
 	// Check if channel mode is SWIFT V2 and not Direct. And Supply the MAC address to the HNS
 	if cnsconfig.EnableSwiftV2 && cnsconfig.ChannelMode != cns.Direct {
-		macAddress, err := GetPrimaryNICMacAddress()
+		macAddress, err := GetPrimaryNICMacAddress(context.TODO())
 		if err != nil {
 			logger.Errorf("Failed to get primary NIC MAC address: %v", err)
 		} else {
-			logger.Printf("Primary NIC MAC Address: %s", macAddress)
-
-			macPools := []cns.MacPool{
-				cns.MacPool{
-					StartMacAddress: macAddress,
-				},
-			}
-			hnsNetworkRequest := cns.CreateHnsNetworkRequest{
-				NetworkAdapterName: "",
-				MacPools:           macPools,
-			}
-
-			if err := hnsclient.CreateHnsNetwork(hnsNetworkRequest); err != nil {
-				logger.Errorf("Failed to set primary NIC MAC address in HNS: %v", err)
-			}
-
-			hostComputeEndpoints := []hcn.HostComputeEndpoint{
-				hcn.HostComputeEndpoint{
-					MacAddress: macAddress,
-				},
-			}
-
-			if route, err := hcn.AddRoute(hostComputeEndpoints, "", "", false); err != nil {
+			macAddresses := []string{macAddress}
+			if _, err := hcsshim.SetNnvManagementMacAddresses(macAddresses); err != nil {
 				logger.Errorf("Failed to set primary NIC MAC address: %v", err)
 			}
 		}
@@ -1644,6 +1625,13 @@ func PopulateCNSEndpointState(endpointStateStore store.KeyValueStore) error {
 }
 
 // GetPrimaryNICMacAddress fetches the MAC address of the primary NIC on the node.
-func GetPrimaryNICMacAddress() (string, error) {
-	return "", errors.New("primary NIC not found")
+func GetPrimaryNICMacAddress(ctx context.Context) (string, error) {
+	var podInfo cns.PodInfo
+	var Cli client.Client
+	mtpnc := v1alpha1.MultitenantPodNetworkConfig{}
+	mtpncNamespacedName := k8stypes.NamespacedName{Namespace: podInfo.Namespace(), Name: podInfo.Name()}
+	if err := Cli.Get(ctx, mtpncNamespacedName, &mtpnc); err != nil {
+		return "", errors.Wrapf(err, "failed to get pod's mtpnc from cache")
+	}
+	return mtpnc.Status.MacAddress, nil
 }
