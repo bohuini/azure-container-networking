@@ -94,7 +94,7 @@ type NetworkManager interface {
 	Initialize(config *common.PluginConfig, isRehydrationRequired bool) error
 	Uninitialize()
 
-	AddExternalInterface(ifName string, subnet string) error
+	AddExternalInterface(ifName, subnet, nicType string) error
 
 	CreateNetwork(nwInfo *EndpointInfo) error
 	DeleteNetwork(networkID string) error
@@ -300,11 +300,11 @@ func (nm *networkManager) save() error {
 //
 
 // AddExternalInterface adds a host interface to the list of available external interfaces.
-func (nm *networkManager) AddExternalInterface(ifName string, subnet string) error {
+func (nm *networkManager) AddExternalInterface(ifName, subnet, nicType string) error {
 	nm.Lock()
 	defer nm.Unlock()
 
-	err := nm.newExternalInterface(ifName, subnet)
+	err := nm.newExternalInterface(ifName, subnet, nicType)
 	if err != nil {
 		return err
 	}

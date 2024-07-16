@@ -63,6 +63,10 @@ stages:
               name: cni
               os: windows
               os_version: ltsc2022
+            ipv6_hp_bpf_linux_amd64:
+              arch: amd64
+              name: ipv6-hp-bpf
+              os: linux
             npm_linux_amd64:
               arch: amd64
               name: npm
@@ -92,6 +96,10 @@ stages:
             cni_linux_arm64:
               arch: arm64
               name: cni
+              os: linux
+            ipv6_hp_bpf_linux_arm64:
+              arch: arm64
+              name: ipv6-hp-bpf
               os: linux
             npm_linux_arm64:
               arch: arm64
@@ -154,6 +162,9 @@ stages:
               name: cni
               os_versions: ltsc2019 ltsc2022
               platforms: linux/amd64 linux/arm64 windows/amd64
+            ipv6-hp-bpf:
+              name: ipv6-hp-bpf
+              platforms: linux/amd64 linux/arm64
             npm:
               name: npm
               os_versions: ltsc2022
@@ -307,6 +318,7 @@ stages:
       clusterName: "cilium-over"
       nodeCount: ${NODE_COUNT_CILIUM}
       vmSize: ${VM_SIZE_CILIUM}
+      arch: amd64
       cni: "cilium"
 
   - template: cilium/cilium-overlay-load-test-template.yaml
@@ -317,6 +329,7 @@ stages:
       hubbleEnabled: true
       nodeCount: ${NODE_COUNT_CILIUM}
       vmSize: ${VM_SIZE_CILIUM}
+      arch: amd64
       cni: "cilium"
 
   - template: cilium/cilium-overlay-load-test-template.yaml
@@ -357,6 +370,41 @@ stages:
       clusterName: "cil-ds-ov"
       nodeCount: ${NODE_COUNT_CILIUM}
       vmSize: ${VM_SIZE_CILIUM}
+      arch: amd64
+      dualstackVersion: ${CILIUM_DUALSTACK_VERSION}
+      cni: "cilium_dualstack"
+  
+  - template: cilium/cilium-overlay-load-test-template.yaml
+    parameters:
+      name: cilium_ds_arm
+      clusterType: dualstack-byocni-nokubeproxy-up
+      clusterName: "cil-ds-arm"
+      nodeCount: ${NODE_COUNT_CILIUM}
+      vmSize: Standard_D8ps_v5
+      arch: arm64
+      dualstackVersion: ${CILIUM_DUALSTACK_VERSION}
+      cni: "cilium_dualstack"
+
+  - template: cilium/cilium-overlay-load-test-template.yaml
+    parameters:
+      name: cilium_ds_mariner
+      clusterType: dualstack-byocni-nokubeproxy-up
+      clusterName: "cil-ds-mar"
+      nodeCount: ${NODE_COUNT_CILIUM}
+      vmSize: ${VM_SIZE_CILIUM}
+      arch: amd64
+      osSKU: AzureLinux
+      dualstackVersion: ${CILIUM_DUALSTACK_VERSION}
+      cni: "cilium_dualstack"
+  
+  - template: cilium/cilium-overlay-load-test-template.yaml
+    parameters:
+      name: cilium_ds_rdma
+      clusterType: dualstack-byocni-nokubeproxy-up
+      clusterName: "cil-ds-rdma"
+      nodeCount: 2
+      vmSize: Standard_HC44-16rs
+      arch: amd64
       dualstackVersion: ${CILIUM_DUALSTACK_VERSION}
       cni: "cilium_dualstack"
 
@@ -372,6 +420,9 @@ stages:
       - cilium_overlay_arm
       - cilium_overlay_rdma
       - cilium_overlay_ds
+      - cilium_ds_arm
+      - cilium_ds_mariner
+      - cilium_ds_rdma
       - win22_cniv1_HNS
       - linux_cniv1
       - linux_podsubnet
@@ -410,6 +461,15 @@ stages:
             cilium_overlay_ds:
               name: cilium_overlay_ds
               clusterName: "cil-ds-ov"
+            cilium_ds_arm:
+              name: cilium_ds_arm
+              clusterName: "cil-ds-arm"
+            cilium_ds_mariner:
+              name: cilium_ds_mariner
+              clusterName: "cil-ds-mar"
+            cilium_ds_rdma:
+              name: cilium_ds_rdma
+              clusterName: "cil-ds-rdma"
             win22-cniv1:
               name: win22-cniv1
               clusterName: "win22-cniv1"
@@ -449,12 +509,21 @@ stages:
               addSpnToEnvironment: true
               inlineScript: |
                 set -x
+
+                if [[ ${clusterName} =~ 'rdma' ]]; then
+                  region=${LOCATION_RDMA}
+                elif [[ ${clusterName} =~ 'arm' ]]; then
+                  region=${LOCATION_ARM64}
+                else
+                  region=${LOCATION_AMD64}
+                fi
+
                 if [ "$(DELETE_RESOURCES)" ]
                 then
                   echo "Deleting Cluster and resource group"
                   make -C ./hack/aks set-kubeconf AZCLI=az CLUSTER=$(clusterName)-$(commitID)
-                  make -C ./hack/aks azcfg AZCLI=az REGION=$(LOCATION)
-                  make -C ./hack/aks down AZCLI=az REGION=$(LOCATION) SUB=$(SUB_AZURE_NETWORK_AGENT_BUILD_VALIDATIONS) CLUSTER=$(clusterName)-$(commitID)
+                  make -C ./hack/aks azcfg AZCLI=az REGION=${region}
+                  make -C ./hack/aks down AZCLI=az REGION=${region} SUB=$(SUB_AZURE_NETWORK_AGENT_BUILD_VALIDATIONS) CLUSTER=$(clusterName)-$(commitID)
                   echo "Cluster and resources down"
                 else
                   echo "Deletion of resources is False"

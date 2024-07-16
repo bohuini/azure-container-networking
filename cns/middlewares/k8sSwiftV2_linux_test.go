@@ -10,6 +10,7 @@ import (
 	"github.com/Azure/azure-container-networking/cns/logger"
 	"github.com/Azure/azure-container-networking/cns/middlewares/mock"
 	"github.com/Azure/azure-container-networking/cns/types"
+	"github.com/Azure/azure-container-networking/crd/multitenancy/api/v1alpha1"
 	"gotest.tools/v3/assert"
 )
 
@@ -31,6 +32,12 @@ var (
 
 	testPod7GUID = "123e4567-e89b-12d3-a456-426614174000"
 	testPod7Info = cns.NewPodInfo("123e45-eth0", testPod7GUID, "testpod7", "testpod7namespace")
+
+	testPod8GUID = "2006cad4-e54d-472e-863d-c4bac66200a7"
+	testPod8Info = cns.NewPodInfo("2006cad4-eth0", testPod8GUID, "testpod8", "testpod8namespace")
+
+	testPod9GUID = "2006cad4-e54d-472e-863d-c4bac66200a7"
+	testPod9Info = cns.NewPodInfo("2006cad4-eth0", testPod9GUID, "testpod9", "testpod9namespace")
 )
 
 func TestMain(m *testing.M) {
@@ -141,6 +148,35 @@ func TestValidateMultitenantIPConfigsRequestSuccess(t *testing.T) {
 	assert.Equal(t, err, "")
 	assert.Equal(t, respCode, types.Success)
 	assert.Equal(t, happyReq.SecondaryInterfacesExist, true)
+
+	happyReq2 := &cns.IPConfigsRequest{
+		PodInterfaceID:   testPod8Info.InterfaceID(),
+		InfraContainerID: testPod8Info.InfraContainerID(),
+	}
+
+	b, _ = testPod8Info.OrchestratorContext()
+	happyReq2.OrchestratorContext = b
+	happyReq2.SecondaryInterfacesExist = false
+
+	_, respCode, err = middleware.validateIPConfigsRequest(context.TODO(), happyReq2)
+	assert.Equal(t, err, "")
+	assert.Equal(t, respCode, types.Success)
+	assert.Equal(t, happyReq.SecondaryInterfacesExist, true)
+
+	happyReq3 := &cns.IPConfigsRequest{
+		PodInterfaceID:   testPod9Info.InterfaceID(),
+		InfraContainerID: testPod9Info.InfraContainerID(),
+	}
+
+	b, _ = testPod9Info.OrchestratorContext()
+	happyReq3.OrchestratorContext = b
+	happyReq3.SecondaryInterfacesExist = false
+
+	_, respCode, err = middleware.validateIPConfigsRequest(context.TODO(), happyReq3)
+	assert.Equal(t, err, "")
+	assert.Equal(t, respCode, types.Success)
+	assert.Equal(t, happyReq3.SecondaryInterfacesExist, false)
+	assert.Equal(t, happyReq3.BackendInterfaceExist, true)
 }
 
 func TestValidateMultitenantIPConfigsRequestFailure(t *testing.T) {
@@ -373,11 +409,8 @@ func TestNICTypeConfigSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(ipInfos) != 1 {
-		t.Fatalf("expected 1 ipInfo, got %d", len(ipInfos))
-	}
-	if ipInfos[0].NICType != cns.BackendNIC {
-		t.Errorf("expected NIC type %v, got %v", cns.BackendNIC, ipInfos[0].NICType)
+	if len(ipInfos) != 0 {
+		t.Fatalf("expected 0 ipInfo, got %d", len(ipInfos))
 	}
 }
 
@@ -404,7 +437,7 @@ func TestGetSWIFTv2IPConfigMultiInterfaceSuccess(t *testing.T) {
 	assert.Equal(t, err, nil)
 	// Ensure that the length of ipInfos matches the number of InterfaceInfos
 	// Adjust this according to the test setup in mock client
-	expectedInterfaceCount := 3
+	expectedInterfaceCount := 2
 	assert.Equal(t, len(ipInfos), expectedInterfaceCount)
 
 	for _, ipInfo := range ipInfos {
@@ -422,4 +455,30 @@ func TestGetSWIFTv2IPConfigMultiInterfaceSuccess(t *testing.T) {
 		}
 		assert.Equal(t, ipInfo.SkipDefaultRoutes, false)
 	}
+}
+
+func TestAssignSubnetPrefixSuccess(t *testing.T) {
+	middleware := K8sSWIFTv2Middleware{Cli: mock.NewClient()}
+
+	podIPInfo := cns.PodIpInfo{
+		PodIPConfig: cns.IPSubnet{
+			IPAddress:    "20.240.1.242",
+			PrefixLength: 32,
+		},
+		NICType:    cns.DelegatedVMNIC,
+		MacAddress: "12:34:56:78:9a:bc",
+	}
+
+	intInfo := v1alpha1.InterfaceInfo{
+		GatewayIP:          "20.240.1.1",
+		SubnetAddressSpace: "20.240.1.0/16",
+	}
+
+	ipInfo := podIPInfo
+	err := middleware.assignSubnetPrefixLengthFields(&ipInfo, intInfo, ipInfo.PodIPConfig.IPAddress)
+	assert.Equal(t, err, nil)
+	// assert that the function for linux does not modify any fields
+	assert.Equal(t, ipInfo.PodIPConfig.PrefixLength, uint8(32))
+	assert.Equal(t, ipInfo.HostPrimaryIPInfo.Gateway, "")
+	assert.Equal(t, ipInfo.HostPrimaryIPInfo.Subnet, "")
 }

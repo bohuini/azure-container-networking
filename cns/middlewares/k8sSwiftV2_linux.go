@@ -8,6 +8,7 @@ import (
 	"github.com/Azure/azure-container-networking/cns/configuration"
 	"github.com/Azure/azure-container-networking/cns/logger"
 	"github.com/Azure/azure-container-networking/cns/middlewares/utils"
+	"github.com/Azure/azure-container-networking/crd/multitenancy/api/v1alpha1"
 	"github.com/pkg/errors"
 )
 
@@ -94,4 +95,9 @@ func addRoutes(cidrs []string, gatewayIP string) []cns.Route {
 		}
 	}
 	return routes
+}
+
+// assignSubnetPrefixLengthFields is a no-op for linux swiftv2 as the default prefix-length is sufficient
+func (k *K8sSWIFTv2Middleware) assignSubnetPrefixLengthFields(_ *cns.PodIpInfo, _ v1alpha1.InterfaceInfo, _ string) error {
+	return nil
 }

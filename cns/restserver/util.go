@@ -40,6 +40,36 @@ func (service *HTTPRestService) setNetworkInfo(networkName string, networkInfo *
 	service.state.Networks[networkName] = networkInfo
 }
 
+func (service *HTTPRestService) SavePnpIDMacaddressMapping(ctx context.Context) error {
+	// If mapping is already set, skip setting it again.
+	if len(service.state.PnpIDByMacAddress) != 0 {
+		return nil
+	}
+	p := platform.NewExecClient(nil)
+	vfMacAddressMapping, err := platform.FetchMacAddressPnpIDMapping(ctx, p)
+	if err != nil {
+		return errors.Wrap(err, "failed to fetch MACAddressPnpIDMapping")
+	}
+	service.state.PnpIDByMacAddress = vfMacAddressMapping
+	if err = service.saveState(); err != nil {
+		logger.Errorf("Failed to save mapping to statefile: %v", err)
+	}
+	return nil
+}
+
+func (service *HTTPRestService) getPNPIDFromMacAddress(ctx context.Context, macAddress string) (string, error) {
+	// If map is empty in state file, CNS needs to populate state file before it returns back the response
+	if len(service.state.PnpIDByMacAddress) == 0 {
+		if err := service.SavePnpIDMacaddressMapping(ctx); err != nil {
+			return "", err
+		}
+	}
+	if _, ok := service.state.PnpIDByMacAddress[macAddress]; !ok {
+		return "", errors.New("Backend Network adapter not found")
+	}
+	return service.state.PnpIDByMacAddress[macAddress], nil
+}
+
 // Remove the network info from the service network state
 func (service *HTTPRestService) removeNetworkInfo(networkName string) {
 	service.Lock()
@@ -756,12 +786,8 @@ func (service *HTTPRestService) SendNCSnapShotPeriodically(ctx context.Context, 
 }
 
 func (service *HTTPRestService) validateIPConfigsRequest(ctx context.Context, ipConfigsRequest cns.IPConfigsRequest) (cns.PodInfo, types.ResponseCode, string) {
-	if service.state.OrchestratorType != cns.KubernetesCRD && service.state.OrchestratorType != cns.Kubernetes {
-		return nil, types.UnsupportedOrchestratorType, "ReleaseIPConfig API supported only for kubernetes orchestrator"
-	}
-
 	if ipConfigsRequest.OrchestratorContext == nil {
-		return nil, types.EmptyOrchestratorContext, fmt.Sprintf("OrchastratorContext is not set in the req: %+v", ipConfigsRequest)
+		return nil, types.EmptyOrchestratorContext, fmt.Sprintf("OrchestratorContext is not set in the req: %+v", ipConfigsRequest)
 	}
 
 	// retrieve podinfo from orchestrator context
