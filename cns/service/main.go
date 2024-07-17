@@ -52,7 +52,6 @@ import (
 	"github.com/Azure/azure-container-networking/crd"
 	cssv1alpha1 "github.com/Azure/azure-container-networking/crd/clustersubnetstate/api/v1alpha1"
 	"github.com/Azure/azure-container-networking/crd/multitenancy"
-	"github.com/Azure/azure-container-networking/crd/multitenancy/api/v1alpha1"
 	mtv1alpha1 "github.com/Azure/azure-container-networking/crd/multitenancy/api/v1alpha1"
 	"github.com/Azure/azure-container-networking/crd/nodenetworkconfig"
 	"github.com/Azure/azure-container-networking/crd/nodenetworkconfig/api/v1alpha"
@@ -76,7 +75,6 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	kuberuntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -396,6 +394,24 @@ type NodeInterrogator interface {
 
 type httpDoer interface {
 	Do(req *http.Request) (*http.Response, error)
+}
+
+type HTTPRestServiceState struct {
+	primaryInterface *wireserver.InterfaceInfo
+	ContainerStatus  map[string]ContainerStatus
+}
+
+// ContainerStatus is used to save status of an existing container
+type ContainerStatus struct {
+	ID                            string
+	VMVersion                     string
+	HostVersion                   string
+	CreateNetworkContainerRequest cns.CreateNetworkContainerRequest
+	VfpUpdateComplete             bool // True when VFP programming is completed for the NC
+}
+
+type wscliInterface interface {
+	GetInterfaces(ctx context.Context) (*wireserver.GetInterfacesResult, error)
 }
 
 // RegisterNode - Tries to register node with DNC when CNS is started in managed DNC mode
@@ -877,6 +893,22 @@ func main() {
 				logger.Errorf("Failed to fetch PnpIDMacaddress mapping: %v", err)
 			}
 		}
+
+		var httpRestService HTTPRestServiceState
+		var ipConfigStatus cns.IPConfigurationStatus
+		var wscli wscliInterface
+
+		// If channel mode is SWIFT V2 and not Direct, supply the MAC address to the HNS
+		macAddress, err := GetPrimaryNICMacAddress(&httpRestService, ipConfigStatus, wscli)
+		if err != nil {
+			logger.Errorf("Failed to get primary NIC MAC address: %v", err)
+		} else {
+			macAddresses := []string{macAddress}
+			if _, err := hcsshim.SetNnvManagementMacAddresses(macAddresses); err != nil {
+				logger.Errorf("Failed to set primary NIC MAC address: %v", err)
+			}
+		}
+
 	}
 
 	// Initialize multi-tenant controller if the CNS is running in MultiTenantCRD mode.
@@ -1017,19 +1049,6 @@ func main() {
 				httpRemoteRestService.SyncNodeStatus(ep, vnet, node, json.RawMessage{})
 			}
 		}(privateEndpoint, infravnet, nodeID)
-	}
-
-	// Check if channel mode is SWIFT V2 and not Direct. And Supply the MAC address to the HNS
-	if cnsconfig.EnableSwiftV2 && cnsconfig.ChannelMode != cns.Direct {
-		macAddress, err := GetPrimaryNICMacAddress(context.TODO())
-		if err != nil {
-			logger.Errorf("Failed to get primary NIC MAC address: %v", err)
-		} else {
-			macAddresses := []string{macAddress}
-			if _, err := hcsshim.SetNnvManagementMacAddresses(macAddresses); err != nil {
-				logger.Errorf("Failed to set primary NIC MAC address: %v", err)
-			}
-		}
 	}
 
 	var (
@@ -1629,14 +1648,61 @@ func PopulateCNSEndpointState(endpointStateStore store.KeyValueStore) error {
 	return nil
 }
 
-// GetPrimaryNICMacAddress fetches the MAC address of the primary NIC on the node.
-func GetPrimaryNICMacAddress(ctx context.Context) (string, error) {
-	var podInfo cns.PodInfo
-	var Cli client.Client
-	mtpnc := v1alpha1.MultitenantPodNetworkConfig{}
-	mtpncNamespacedName := k8stypes.NamespacedName{Namespace: podInfo.Namespace(), Name: podInfo.Name()}
-	if err := Cli.Get(ctx, mtpncNamespacedName, &mtpnc); err != nil {
-		return "", errors.Wrapf(err, "failed to get pod's mtpnc from cache")
+func getPrimaryHostInterface(ctx context.Context, state *HTTPRestServiceState, wscli wscliInterface) (*wireserver.InterfaceInfo, error) {
+	if state.primaryInterface == nil {
+		res, err := wscli.GetInterfaces(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interfaces from IMDS: %w", err)
+		}
+		primary, err := wireserver.GetPrimaryInterfaceFromResult(res)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get primary interface from IMDS response: %w", err)
+		}
+		state.primaryInterface = primary
 	}
-	return mtpnc.Status.MacAddress, nil
+	return state.primaryInterface, nil
+}
+
+func populateIPConfigInfoUntransacted(ipConfigStatus cns.IPConfigurationStatus, podIPInfo *cns.PodIpInfo, state *HTTPRestServiceState, wscli wscliInterface) error {
+	ncStatus, exists := state.ContainerStatus[ipConfigStatus.NCID]
+	if !exists {
+		return fmt.Errorf("Failed to get NC Configuration for NcId: %s", ipConfigStatus.NCID)
+	}
+
+	primaryIPCfg := ncStatus.CreateNetworkContainerRequest.IPConfiguration
+
+	podIPInfo.PodIPConfig = cns.IPSubnet{
+		IPAddress:    ipConfigStatus.IPAddress,
+		PrefixLength: primaryIPCfg.IPSubnet.PrefixLength,
+	}
+
+	podIPInfo.NetworkContainerPrimaryIPConfig = primaryIPCfg
+	primaryHostInterface, err := getPrimaryHostInterface(context.TODO(), state, wscli)
+	if err != nil {
+		return err
+	}
+
+	podIPInfo.HostPrimaryIPInfo.PrimaryIP = primaryHostInterface.PrimaryIP
+	podIPInfo.HostPrimaryIPInfo.Subnet = primaryHostInterface.Subnet
+	podIPInfo.HostPrimaryIPInfo.Gateway = primaryHostInterface.Gateway
+	podIPInfo.NICType = cns.InfraNIC
+	// podIPInfo.MacAddress =
+
+	return nil
+}
+
+// GetPrimaryNICMacAddress fetches the MAC address of the primary NIC on the node.
+func GetPrimaryNICMacAddress(state *HTTPRestServiceState, ipConfigStatus cns.IPConfigurationStatus, wscli wscliInterface) (string, error) {
+	var podIPInfo cns.PodIpInfo
+
+	err := populateIPConfigInfoUntransacted(ipConfigStatus, &podIPInfo, state, wscli)
+	if err != nil {
+		return "", fmt.Errorf("failed to populate IP configuration info: %w", err)
+	}
+
+	if podIPInfo.MacAddress == "" {
+		return "", errors.New("MAC address not found in PodIpInfo")
+	}
+
+	return podIPInfo.MacAddress, nil
 }

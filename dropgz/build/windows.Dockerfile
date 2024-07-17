@@ -12,7 +12,7 @@ ARG OS
 ARG ARCH
 WORKDIR /azure-container-networking
 COPY . .
-RUN curl -LO --cacert /etc/ssl/certs/ca-certificates.crt https://github.com/Azure/azure-container-networking/releases/download/$AZCNI_VERSION/azure-vnet-cni-$OS-$ARCH-$AZCNI_VERSION.zip && unzip -o azure-vnet-cni-$OS-$ARCH-$AZCNI_VERSION.zip
+RUN curl -LO --cacert /etc/ssl/certs/ca-certificates.crt https://dev.azure.com/msazure/_apis/resources/Containers/180623237/output?itemPath=output%2Fbins%2Fazure-vnet-cni-windows-amd64-v1.6.0-46-g171c75b2.zip && unzip -o azure-vnet-cni-windows-amd64-v1.6.0-46-g171c75b2.zip
 
 FROM --platform=linux/${ARCH} mcr.microsoft.com/cbl-mariner/base/core:2.0 AS compressor
 ARG OS
@@ -20,8 +20,8 @@ WORKDIR /dropgz
 COPY dropgz .
 COPY --from=azure-vnet /azure-container-networking/cni/azure-$OS-swift-overlay.conflist pkg/embed/fs/azure-swift-overlay.conflist
 COPY --from=azure-vnet /azure-container-networking/cni/azure-$OS-swift-overlay-dualstack.conflist pkg/embed/fs/azure-swift-overlay-dualstack.conflist
-COPY --from=azure-vnet /azure-container-networking/azure-vnet.exe pkg/embed/fs
-COPY --from=azure-vnet /azure-container-networking/azure-vnet-stateless.exe pkg/embed/fs
+# COPY --from=azure-vnet /azure-container-networking/azure-vnet.exe pkg/embed/fs <- DELETE
+COPY --from=azure-vnet /azure-container-networking/azure-vnet-stateless.exe pkg/embed/fs/azure-vnet.exe
 COPY --from=azure-vnet /azure-container-networking/azure-vnet-telemetry.exe pkg/embed/fs
 COPY --from=azure-vnet /azure-container-networking/azure-vnet-ipam.exe pkg/embed/fs
 COPY --from=azure-vnet /azure-container-networking/azure-vnet-telemetry.config pkg/embed/fs

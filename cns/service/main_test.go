@@ -10,7 +10,9 @@ import (
 	"github.com/Azure/azure-container-networking/cns"
 	"github.com/Azure/azure-container-networking/cns/fakes"
 	"github.com/Azure/azure-container-networking/cns/logger"
+	"github.com/Azure/azure-container-networking/cns/wireserver"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 // MockHTTPClient is a mock implementation of HTTPClient
@@ -68,4 +70,65 @@ func TestSendRegisterNodeRequest_StatusAccepted(t *testing.T) {
 	mockClient := &MockHTTPClient{Response: mockResponse, Err: nil}
 
 	assert.Error(t, sendRegisterNodeRequest(ctx, mockClient, httpServiceFake, nodeRegisterReq, url))
+}
+
+// Mock for wscliInterface
+type mockWscli struct {
+	mock.Mock
+}
+
+func (m *mockWscli) GetInterfaces(ctx context.Context) (*wireserver.GetInterfacesResult, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(*wireserver.GetInterfacesResult), args.Error(1)
+}
+
+// Mock data
+var (
+	mockInterfaceInfo = &wireserver.InterfaceInfo{
+		PrimaryIP: "10.0.0.1",
+		Subnet:    "10.0.0.0/24",
+		Gateway:   "10.0.0.254",
+	}
+
+	mockIPConfigStatus = cns.IPConfigurationStatus{
+		NCID:      "test-nc",
+		IPAddress: "10.0.0.2",
+	}
+
+	mockContainerStatus = map[string]ContainerStatus{
+		"test-nc": {
+			CreateNetworkContainerRequest: cns.CreateNetworkContainerRequest{
+				IPConfiguration: cns.IPConfiguration{
+					IPSubnet: cns.IPSubnet{
+						PrefixLength: 24,
+					},
+				},
+			},
+		},
+	}
+)
+
+func TestGetPrimaryNICMacAddress(t *testing.T) {
+	// Create a mock wscli
+	mockWscli := new(mockWscli)
+
+	// Set up the state
+	state := &HTTPRestServiceState{
+		ContainerStatus: mockContainerStatus,
+	}
+
+	// Test success case
+	mockWscli.On("GetInterfaces", mock.Anything).Return(&wireserver.GetInterfacesResult{
+		Interface: *mockInterfaceInfo,
+	}, nil)
+
+	macAddress, err := GetPrimaryNICMacAddress(state, mockIPConfigStatus, mockWscli)
+	assert.NoError(t, err)
+	assert.Equal(t, mockInterfaceInfo.MacAddress, macAddress)
+
+	// Test error case: No container status
+	state.ContainerStatus = map[string]ContainerStatus{}
+	_, err = GetPrimaryNICMacAddress(state, mockIPConfigStatus, mockWscli)
+	assert.Error(t, err)
+	assert.Equal(t, "Failed to get NC Configuration for NcId: test-nc", err.Error())
 }
