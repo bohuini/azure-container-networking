@@ -10,6 +10,8 @@ import (
 	"github.com/Azure/azure-container-networking/cns"
 	"github.com/Azure/azure-container-networking/cns/fakes"
 	"github.com/Azure/azure-container-networking/cns/logger"
+	"github.com/Azure/azure-container-networking/cns/wireserver"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -70,63 +72,102 @@ func TestSendRegisterNodeRequest_StatusAccepted(t *testing.T) {
 	assert.Error(t, sendRegisterNodeRequest(ctx, mockClient, httpServiceFake, nodeRegisterReq, url))
 }
 
-// // Mock for wscliInterface
-// type mockWscli struct {
-// 	mock.Mock
-// }
+// Mock implementation of wscliInterface
+type mockWscli struct {
+	result *wireserver.GetInterfacesResult
+	err    error
+}
 
-// func (m *mockWscli) GetInterfaces(ctx context.Context) (*wireserver.GetInterfacesResult, error) {
-// 	args := m.Called(ctx)
-// 	return args.Get(0).(*wireserver.GetInterfacesResult), args.Error(1)
-// }
+func (m *mockWscli) GetInterfaces(ctx context.Context) (*wireserver.GetInterfacesResult, error) {
+	return m.result, m.err
+}
 
-// // Mock data
-// var (
-// 	mockInterfaceInfo = &wireserver.InterfaceInfo{
-// 		PrimaryIP: "10.0.0.1",
-// 		Subnet:    "10.0.0.0/24",
-// 		Gateway:   "10.0.0.254",
-// 	}
+func TestGetPrimaryNICMACAddress(t *testing.T) {
+	tests := []struct {
+		name     string
+		wscli    wscliInterface
+		expected string
+		wantErr  bool
+	}{
+		{
+			name: "Primary interface found",
+			wscli: &mockWscli{
+				result: &wireserver.GetInterfacesResult{
+					Interface: []wireserver.Interface{
+						{
+							MacAddress: "00-11-22-33-44-55",
+							IsPrimary:  true,
+							IPSubnet: []wireserver.Subnet{
+								{
+									Prefix: "192.168.1.0/24",
+								},
+							},
+						},
+					},
+				},
+				err: nil,
+			},
+			expected: "00-11-22-33-44-55",
+			wantErr:  false,
+		},
+		{
+			name: "No primary interface",
+			wscli: &mockWscli{
+				result: &wireserver.GetInterfacesResult{
+					Interface: []wireserver.Interface{
+						{
+							MacAddress: "00-11-22-33-44-55",
+							IsPrimary:  false,
+							IPSubnet: []wireserver.Subnet{
+								{
+									Prefix: "192.168.1.0/24",
+								},
+							},
+						},
+					},
+				},
+				err: nil,
+			},
+			expected: "",
+			wantErr:  true,
+		},
+		{
+			name: "No subnets in primary interface",
+			wscli: &mockWscli{
+				result: &wireserver.GetInterfacesResult{
+					Interface: []wireserver.Interface{
+						{
+							MacAddress: "00-11-22-33-44-55",
+							IsPrimary:  true,
+							IPSubnet:   []wireserver.Subnet{},
+						},
+					},
+				},
+				err: nil,
+			},
+			expected: "",
+			wantErr:  true,
+		},
+		{
+			name: "Error fetching interfaces",
+			wscli: &mockWscli{
+				result: nil,
+				err:    errors.New("failed to get interfaces"),
+			},
+			expected: "",
+			wantErr:  true,
+		},
+	}
 
-// 	mockIPConfigStatus = cns.IPConfigurationStatus{
-// 		NCID:      "test-nc",
-// 		IPAddress: "10.0.0.2",
-// 	}
-
-// 	mockContainerStatus = map[string]ContainerStatus{
-// 		"test-nc": {
-// 			CreateNetworkContainerRequest: cns.CreateNetworkContainerRequest{
-// 				IPConfiguration: cns.IPConfiguration{
-// 					IPSubnet: cns.IPSubnet{
-// 						PrefixLength: 24,
-// 					},
-// 				},
-// 			},
-// 		},
-// 	}
-// )
-
-// func TestGetPrimaryNICMacAddress(t *testing.T) {
-// 	// Create a mock wscli
-// 	mockWscli := new(mockWscli)
-
-// 	// Set up the state
-// 	state := &HTTPRestServiceState{
-// 		ContainerStatus: mockContainerStatus,
-// 	}
-
-// 	// Test success case
-// 	mockWscli.On("GetInterfaces", mock.Anything).Return(&wireserver.GetInterfacesResult{
-// 		Interface: *mockInterfaceInfo,
-// 	}, nil)
-
-// 	macAddress, err := GetPrimaryNICMacAddress(state, mockIPConfigStatus, mockWscli)
-// 	assert.NoError(t, err)
-// 	assert.Equal(t, mockInterfaceInfo.MacAddress, macAddress)
-
-// 	// Test error case: No container status
-// 	state.ContainerStatus = map[string]ContainerStatus{}
-// 	_, err = GetPrimaryNICMacAddress(state, mockIPConfigStatus, mockWscli)
-// 	assert.Error(t, err)
-// 	assert.Equal(t, "Failed to get NC Configuration for NcId: test-nc", err.Error())
-// }
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			macAddress, err := getPrimaryNICMACAddress(tt.wscli)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.expected, macAddress)
+		})
+	}
+}
