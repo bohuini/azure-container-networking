@@ -892,23 +892,19 @@ func main() {
 			if err = httpRemoteRestService.SavePnpIDMacaddressMapping(rootCtx); err != nil {
 				logger.Errorf("Failed to fetch PnpIDMacaddress mapping: %v", err)
 			}
-		}
-
-		var httpRestService HTTPRestServiceState
-		var ipConfigStatus cns.IPConfigurationStatus
-		var wscli wscliInterface
-
-		// If channel mode is SWIFT V2 and not Direct, supply the MAC address to the HNS
-		macAddress, err := GetPrimaryNICMacAddress(&httpRestService, ipConfigStatus, wscli)
-		if err != nil {
-			logger.Errorf("Failed to get primary NIC MAC address: %v", err)
-		} else {
-			macAddresses := []string{macAddress}
-			if _, err := hcsshim.SetNnvManagementMacAddresses(macAddresses); err != nil {
-				logger.Errorf("Failed to set primary NIC MAC address: %v", err)
+			// Setting primary macaddress if VF is enabled on the nics for swiftv2
+			var wscli wscliInterface
+			// SWIFT V2 mode for accelnet, supply the MAC address to the HNS
+			macAddress, err := getPrimaryNICMACAddress(wscli)
+			if err != nil {
+				logger.Errorf("Failed to get primary NIC MAC address: %v", err)
+			} else {
+				macAddresses := []string{macAddress}
+				if _, err := hcsshim.SetNnvManagementMacAddresses(macAddresses); err != nil {
+					logger.Errorf("Failed to set primary NIC MAC address: %v", err)
+				}
 			}
 		}
-
 	}
 
 	// Initialize multi-tenant controller if the CNS is running in MultiTenantCRD mode.
@@ -1648,61 +1644,27 @@ func PopulateCNSEndpointState(endpointStateStore store.KeyValueStore) error {
 	return nil
 }
 
-func getPrimaryHostInterface(ctx context.Context, state *HTTPRestServiceState, wscli wscliInterface) (*wireserver.InterfaceInfo, error) {
-	if state.primaryInterface == nil {
-		res, err := wscli.GetInterfaces(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get interfaces from IMDS: %w", err)
-		}
-		primary, err := wireserver.GetPrimaryInterfaceFromResult(res)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get primary interface from IMDS response: %w", err)
-		}
-		state.primaryInterface = primary
-	}
-	return state.primaryInterface, nil
-}
-
-func populateIPConfigInfoUntransacted(ipConfigStatus cns.IPConfigurationStatus, podIPInfo *cns.PodIpInfo, state *HTTPRestServiceState, wscli wscliInterface) error {
-	ncStatus, exists := state.ContainerStatus[ipConfigStatus.NCID]
-	if !exists {
-		return fmt.Errorf("Failed to get NC Configuration for NcId: %s", ipConfigStatus.NCID)
-	}
-
-	primaryIPCfg := ncStatus.CreateNetworkContainerRequest.IPConfiguration
-
-	podIPInfo.PodIPConfig = cns.IPSubnet{
-		IPAddress:    ipConfigStatus.IPAddress,
-		PrefixLength: primaryIPCfg.IPSubnet.PrefixLength,
-	}
-
-	podIPInfo.NetworkContainerPrimaryIPConfig = primaryIPCfg
-	primaryHostInterface, err := getPrimaryHostInterface(context.TODO(), state, wscli)
+// getPrimaryNICMacAddress fetches the MAC address of the primary NIC on the node.
+func getPrimaryNICMACAddress(wscli wscliInterface) (string, error) {
+	res, err := wscli.GetInterfaces(context.TODO())
 	if err != nil {
-		return err
+		return "", fmt.Errorf("failed to find primary interface info: %w", err)
+	}
+	var macAddress string
+	for _, i := range res.Interface {
+		// skip if not primary
+		if !i.IsPrimary {
+			continue
+		}
+		// skip if no subnets
+		if len(i.IPSubnet) == 0 {
+			continue
+		}
+		macAddress = i.MacAddress
 	}
 
-	podIPInfo.HostPrimaryIPInfo.PrimaryIP = primaryHostInterface.PrimaryIP
-	podIPInfo.HostPrimaryIPInfo.Subnet = primaryHostInterface.Subnet
-	podIPInfo.HostPrimaryIPInfo.Gateway = primaryHostInterface.Gateway
-	podIPInfo.NICType = cns.InfraNIC
-	// podIPInfo.MacAddress =
-
-	return nil
-}
-
-// GetPrimaryNICMacAddress fetches the MAC address of the primary NIC on the node.
-func GetPrimaryNICMacAddress(state *HTTPRestServiceState, ipConfigStatus cns.IPConfigurationStatus, wscli wscliInterface) (string, error) {
-	var podIPInfo cns.PodIpInfo
-
-	err := populateIPConfigInfoUntransacted(ipConfigStatus, &podIPInfo, state, wscli)
-	if err != nil {
-		return "", fmt.Errorf("failed to populate IP configuration info: %w", err)
+	if macAddress == "" {
+		return "", errors.New("MAC address not found in wscli")
 	}
-
-	if podIPInfo.MacAddress == "" {
-		return "", errors.New("MAC address not found in PodIpInfo")
-	}
-
-	return podIPInfo.MacAddress, nil
+	return macAddress, nil
 }
