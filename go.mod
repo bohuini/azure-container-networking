@@ -1,6 +1,6 @@
 module github.com/Azure/azure-container-networking
 
-go 1.23.2
+go 1.24.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.18.0
@@ -128,7 +128,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources v1.2.0
 	github.com/cilium/cilium v1.15.15
 	github.com/jsternberg/zap-logfmt v1.3.0
-	golang.org/x/sync v0.13.0
+	golang.org/x/sync v0.19.0
 	gotest.tools/v3 v3.5.2
 	k8s.io/kubectl v0.28.5
 	sigs.k8s.io/yaml v1.4.0
